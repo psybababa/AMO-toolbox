@@ -30,9 +30,9 @@ FEDVR（Finite Element Discrete Variable Representation）は、有限要素法�
 golub_welsch.f90
 Gauss–Lobattoノードと重みを、Golub–Welschアルゴリズムで生成します。Jacobi多項式の三項漸化式を対称三重対角化し、LAPACKのdstevで固有値問題を解いて零点と直交多項式の値を求めています。
 三項漸化式を調整すれば、他の直交多項式（例: チェビシェフ多項式）にも使えます（サンプルコードを近日追加予定）。
+
 finite_element_dvr.f90
 FEDVRの基本機能を提供します：
-
 バリセントリック重み（ラグランジュ補間の安定計算用）
 微分行列D_ref（Lobatto点上での高精度微分）
 全体のグリッドの構築
