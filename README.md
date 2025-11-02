@@ -1,5 +1,7 @@
 AMO-toolbox
+
 原子・分子・光学物理学（AMO）の学習者向けに、数値計算のアルゴリズムとサンプルコードを集めたツールボックスです。
+
 ライセンス
 MIT License
 Copyright (c) 2025 Kawaii_bokuchin_Puyuyu
