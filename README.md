@@ -43,7 +43,7 @@ IEM_DVR.f90
 R.A. Gonzalesの論文
 Gonzales, R. A., Eisert, J., Koltracht, I., Neumann, M., & Rawitscher, G. (1997). Integral equation method for the continuous spectrum radial Schrödinger equation. Journal of computational physics, 134(1), 134-149.
 を参考に,チェビシェフ点の代わりにlobatto点を用いて実装しました
-動かす際に必要なプログラムにhttps://www.fresco.org.uk/functions/barnett/index.htmで配布されているCOUL90があります.
+動かす際に必要なプログラムにhttps://www.fresco.org.uk/functions/barnett/index.htm で配布されているCOUL90があります.
 (自由粒子,箱型ポテンシャルで位相のずれを計算し,精度は確認済みです)
 
 
