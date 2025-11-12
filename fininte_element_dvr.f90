@@ -22,7 +22,7 @@ module finite_element_dvr
     private
     public ::  build_element_matrices, compute_barycentric_weights, compute_differentiation_matrix
     public ::  assemble_global_matrices, build_hamiltonian_matrix, assemble_global_hamiltonian
-    public ::  build_global_grid
+    public ::  build_global_grid, build_potential_diag
 
     contains
 
@@ -180,17 +180,16 @@ end subroutine build_element_matrices
     !------------------------------------------------------------------
     !
     ! build_potential_diag
-    ! currently the potential is hardcoded as V(x) = Z_eff / x
-    ! Z_eff = Z_nuclei - (Z_z - 1) * (1 - WS) woods-saxon type potential
+    ! currently the potential is hardcoded as V(x) = -Z_eff / x
+    ! Z_eff = 1 + (Z_nuclei - 1) * WS  (WS Woods-Saxon screening, residual +1 at infinity)
     ! WS = 1 / (1 + (\eta/kia) * (exp(kia*r) - 1) )
     ! Z_nuclei : nuclear charge 54 for Xe
-    ! Z_z : total number of electrons 54 
     ! eta : screening parameter 5.197
     ! kia : 1.048
     !
     ! key_soi = 1
     ! dV/dr = - Z_eff / r^2 - DZ_eff / r
-    ! Dz_eff = (Z_z - 1) * (eta * exp(kia*r)) * WS^2
+    ! Dz_eff = -(Z_nuclei - 1) * (eta * exp(kia*r)) * WS^2
     ! V_soi = alpha^2 / (4 * r) * dV/dr * (J^2 - L^2 - 3/4 ) 
     ! 
     ! this will be modified to take various potential forms later 
@@ -206,7 +205,7 @@ subroutine build_potential_diag(n, x, v, key_soi, j_tot, L, info)
     real(wp), intent(out) :: v(:)            ! potential diagonal entries
     integer, intent(out), optional :: info
 
-    real(wp) :: Z_nuclei, Z_z, eta, kia, alpha
+    real(wp) :: Z_nuclei, eta, kia, alpha, z_core
     real(wp) :: r, WS, Z_eff, dZ_eff, dV, V_soi
     integer :: i
     integer :: ierr
@@ -221,7 +220,7 @@ subroutine build_potential_diag(n, x, v, key_soi, j_tot, L, info)
 
     ! ---- model constants (Data extracted from TDSE simulator) ----
     Z_nuclei = 54.0_wp
-    Z_z = 54.0_wp
+    z_core = Z_nuclei - 1.0_wp
     eta = 5.197_wp
     kia = 1.048_wp
     ! fine-structure constant alpha ~ 1/137
@@ -232,11 +231,12 @@ subroutine build_potential_diag(n, x, v, key_soi, j_tot, L, info)
         if (r < rmin) r = rmin
 
         WS = 1.0_wp / (1.0_wp + (eta/kia) * (exp(kia*r) - 1.0_wp) )
-        Z_eff = Z_nuclei - (Z_z - 1.0_wp) * WS
+        ! Ensure Z_eff -> Z_nuclei near the origin and -> 1 for large r (residual ion)
+        Z_eff = 1.0_wp + z_core * WS
 
         if (key_soi == 1) then
             ! derivative of Z_eff wrt r
-            dZ_eff = (Z_z - 1.0_wp) * (eta * exp(kia*r)) * WS**2
+            dZ_eff = -z_core * (eta * exp(kia*r)) * WS**2
             ! derivative of V = -Z_eff(r)/r  => dV/dr = - dZ_eff/r + Z_eff/r^2
             dV = - dZ_eff / r + Z_eff / (r**2)
 
@@ -380,14 +380,14 @@ end subroutine assemble_global_matrices
         integer, intent(in) :: L                 ! orbital angular momentum quantum number
         integer, intent(inout) :: N_global      ! total number of global DVR points (may be inferred)
         real(wp), intent(in) :: x_global(:)       ! global node coordinates
-    real(wp), intent(in) :: M_global(:)     ! global weights (mass diagonal entries)
+        real(wp), intent(in) :: M_global(:)     ! global weights (mass diagonal entries)
         real(wp), intent(out) :: H_global(:,:)  ! global hamiltonian matrix
         real(wp), intent(in), optional :: K_global(:,:) ! optional global stiffness matrix
         integer, intent(out), optional :: info
 
         integer :: ierr, ierr2
-    real(wp), allocatable :: V_diag(:)
-    integer :: i, N
+        real(wp), allocatable :: V_diag(:)
+        integer :: i, N
 
         ierr = 0
         N = N_global
