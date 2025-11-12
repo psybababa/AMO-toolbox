@@ -3,7 +3,7 @@ module dvr_integral_equation_methods
     ! DVR Integral Equation Method module (Gonzales et al. formulation)
     !
     ! Method references:
-    !   - R.A. Gonzales et al., J. Comput. Phys. 134 (1997) 134–149 (IEM)
+    !   - R.A. Gonzales et al., J. Comput. Phys. 134 (1997) 134–149 (element sweep IEM)
     !   - Barnett COUL90 continued–fraction Coulomb functions (wrapped via module COULFG)
     !   - FEDVR infrastructure in this repository for Gauss–Lobatto nodes & weights
     !
@@ -14,9 +14,6 @@ module dvr_integral_equation_methods
     !   要素間結合係数 cy, cz, sy, sz を用いて (A_i, B_i) の 2×2 ブロック三重対角系を構築する。
     !   その後グローバル波動関数 φ(r) を再構成し、外端 r=T で Coulomb 関数 F_l, G_l による境界マッチング
     !   から位相シフト δ_l を計算する。
-    !
-    !    自由粒子,箱型ポテンシャルで 10^(-13)程度の位相のずれの精度をチェック済
-    !    修正・改造はご自由にどうぞ
     !
     ! Design notes:
     !   - Local IE discretisation splits integrals at r_j relative ordering (j>i or j<i).
@@ -50,7 +47,7 @@ module dvr_integral_equation_methods
 
 contains
 
-    subroutine dvr_iem_solve(nelems, nloc, r_max, k_wave, ell, key_soi, j_tot, solution, nodes, phase_shift, info, potential_model)
+    subroutine dvr_iem_solve(nelems, nloc, r_max, k_wave, ell, key_soi, j_tot, solution, nodes, phase_shift, info, potential_model, residual_out, so_factor_out)
         ! High-level driver for the Gonzales-style DVR-IEM solver.
         ! nelems   : number of FEDVR elements
         ! nloc     : local Lobatto points per element
@@ -66,7 +63,9 @@ contains
     ! potential_model (optional) : 0=atomic Coulomb core (default), 1=zero potential
 
         integer, intent(in) :: nelems, nloc, ell, key_soi
-        integer, intent(in), optional :: potential_model
+    integer, intent(in), optional :: potential_model
+    real(wp), intent(out), optional :: residual_out
+    real(wp), intent(out), optional :: so_factor_out
         real(wp), intent(in) :: r_max, k_wave, j_tot
         real(wp), allocatable, intent(out) :: solution(:), nodes(:)
         real(wp), intent(out) :: phase_shift
@@ -77,7 +76,7 @@ contains
         integer, allocatable :: elem_map(:,:), ipiv(:), ipiv_local(:)
         real(wp) :: r_left, r_right, h_elem, scale_deriv
         real(wp) :: weight_j, kr_i, kr_j, val
-        real(wp) :: phi_T, phi_prime_T, eta_tail, rho_tail
+    real(wp) :: phi_T, phi_prime_T, eta_tail, rho_tail, r_tail, z_tail
         real(wp) :: centrifugal
         real(wp), allocatable :: x_ref(:), w_ref(:), bary_w(:)
         real(wp), allocatable :: D_ref(:,:), local_matrix(:,:), rhs(:,:), rhs_copy(:,:)
@@ -88,7 +87,8 @@ contains
         real(wp), allocatable :: x_global(:), M_global(:)
         real(wp), allocatable :: block_matrix(:,:), block_rhs(:)
         real(wp), allocatable :: phi_local(:), counts(:)
-        real(wp) :: proj_num, proj_den
+    real(wp) :: proj_num, proj_den
+    real(wp) :: flux_residual
         real(wp) :: numer, denom
         integer :: ifail
         integer :: pot_model
@@ -169,6 +169,10 @@ contains
             info = -30
             return
         end select
+
+        if (present(so_factor_out)) then
+            so_factor_out = j_tot * (j_tot + 1.0_wp) - real(ell * (ell + 1), wp) - 0.75_wp
+        end if
 
     ! 5. 有効ポテンシャル V_eff = V + l(l+1)/r^2
         do i = 1, N_global
@@ -400,8 +404,10 @@ contains
         end do
         phi_prime_T = phi_prime_T * scale_deriv
 
-        rho_tail = k_wave * nodes(N_global)
-        eta_tail = -V_global(N_global) / k_wave
+    rho_tail = k_wave * nodes(N_global)
+    r_tail = max(nodes(N_global), 1.0e-8_wp)
+    z_tail = -V_global(N_global) * r_tail
+    eta_tail = -z_tail / k_wave
 
         allocate(fc(0:ell), gc(0:ell), fcp(0:ell), gcp(0:ell), stat=ierr)
         if (ierr /= 0) then
@@ -430,9 +436,12 @@ contains
         numer = proj_num
         denom = proj_den
     ! 14. 位相シフト δ_l = atan2(num, den)
-        phase_shift = atan2(numer, denom)
+    phase_shift = atan2(numer, denom)
 
-        deallocate(phi_local)
+    flux_residual = abs(phi_T * gcp(ell) - phi_prime_T * gc(ell))
+    if (present(residual_out)) residual_out = flux_residual
+
+    deallocate(phi_local)
         deallocate(block_matrix, block_rhs, ipiv)
         deallocate(cy, cz, sy, sz)
         deallocate(local_matrix, rhs, rhs_copy)
