@@ -12,7 +12,7 @@ program compute_spin_polarization
     implicit none
 
     integer, parameter :: n_per_elem = 100
-    integer, parameter :: nelems = 10
+    integer, parameter :: nelems = 50
     real(wp), parameter :: r_min = 0.0_wp
     real(wp), parameter :: r_max = 500.0_wp
     real(wp), parameter :: photon_energy = 3.14_wp          ! incident photon energy (a.u.)
@@ -41,6 +41,9 @@ program compute_spin_polarization
     real(wp), allocatable :: phi_l2_saved(:), nodes_saved(:)
     real(wp), allocatable :: phi_l0_saved(:)
     real(wp), allocatable :: phi_l2_j52_saved(:)
+    real(wp), allocatable :: phi_l2_prev(:)
+    real(wp), allocatable :: phi_l0_prev(:)
+    real(wp), allocatable :: phi_l2_j52_prev(:)
     real(wp) :: delta_l2, delta_l0, delta_l2_j52
     real(wp) :: delta_l2_saved, delta_l0_saved, delta_l2_j52_saved
     real(wp) :: norm_val, energy_bound
@@ -60,6 +63,9 @@ program compute_spin_polarization
     real(wp) :: k_scatt
     real(wp), parameter :: node_tol = 1.0e-8_wp
     logical :: have_saved_wave
+    logical :: have_prev_l2
+    logical :: have_prev_l0
+    logical :: have_prev_l2_j52
     complex(wp) :: weight_val, bound_val, scat_val_l2, scat_val_l0, scat_val_l2_j52
     real(wp) :: target_energy_5p
     real(wp) :: coeff_d_j, coeff_s_j
@@ -71,7 +77,7 @@ program compute_spin_polarization
     argument_buffer = ''
     call get_command_argument(1, argument_buffer)
     initial_label = trim(argument_buffer)
-    if (len_trim(initial_label) == 0) initial_label = 'j1_2_m1_2'
+    if (len_trim(initial_label) == 0) initial_label = 'j32_m32'
     normalized_label = to_lower(trim(adjustl(initial_label)))
 
     use_two_d_channels = .false.
@@ -83,7 +89,7 @@ program compute_spin_polarization
     pref_down_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
 
     select case (normalized_label)
-    case ('5p1/2', 'j1_2_m1_2', 'j=1/2,m=1/2')
+    case ('5p1/2', 'j12_m12', 'j=1/2,m=1/2')
         ! Dipole selection for 5p_{1/2}, m_j = +1/2 → εd_{3/2}, εs_{1/2}
         target_energy_5p = -0.446_wp
         coeff_d_j = sqrt(2.0_wp) / 3.0_wp
@@ -92,8 +98,8 @@ program compute_spin_polarization
         pref_down_l2 = cmplx(sqrt(3.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
         pref_up_l0 = cmplx(coeff_s_j, 0.0_wp, kind=wp)
         need_s_wave = .true.
-        output_tag = 'j1_2_m1_2'
-    case ('5p3/2', 'j3_2_m1_2', 'j=3/2,m=1/2')
+        output_tag = 'j12_m12'
+    case ('5p3/2', 'j32_m12', 'j=3/2,m=1/2')
         ! 5p_{3/2}, m_j = +1/2 → εd_{3/2}, εd_{5/2}, εs_{1/2}
         target_energy_5p = -0.439_wp
         coeff_d_j = -1.0_wp / 15.0_wp
@@ -106,8 +112,8 @@ program compute_spin_polarization
         pref_up_l0 = cmplx(coeff_s_j, 0.0_wp, kind=wp)
         use_two_d_channels = .true.
         need_s_wave = .true.
-        output_tag = 'j3_2_m1_2'
-    case ('j3_2_m3_2', 'j=3/2,m=3/2')
+        output_tag = 'j32_m12'
+    case ('j32_m32', 'j=3/2,m=3/2')
         ! 5p_{3/2}, m_j = +3/2 → εd_{3/2}, εd_{5/2}
         target_energy_5p = -0.439_wp
         coeff_d_j = -1.0_wp / 5.0_wp
@@ -118,10 +124,10 @@ program compute_spin_polarization
         pref_down_l2_j52 = cmplx(sqrt(1.0_wp/5.0_wp) * coeff_d_j52, 0.0_wp, kind=wp)
         use_two_d_channels = .true.
         need_s_wave = .false.
-        output_tag = 'j3_2_m3_2'
+        output_tag = 'j32_m32'
     case default
         print '(A)', 'ERROR: Unsupported initial state label: '//trim(initial_label)
-        print '(A)', 'Supported labels: j1_2_m1_2, j3_2_m1_2, j3_2_m3_2'
+        print '(A)', 'Supported labels: j12_m12, j32_m12, j32_m32'
         stop 1
     end select
 
@@ -287,6 +293,21 @@ program compute_spin_polarization
     delta_l0_saved = 0.0_wp
     delta_l2_j52_saved = 0.0_wp
 
+    allocate(phi_l2_prev(n_global))
+    have_prev_l2 = .false.
+    if (need_s_wave) then
+        allocate(phi_l0_prev(n_global))
+        have_prev_l0 = .false.
+    else
+        have_prev_l0 = .false.
+    end if
+    if (use_two_d_channels) then
+        allocate(phi_l2_j52_prev(n_global))
+        have_prev_l2_j52 = .false.
+    else
+        have_prev_l2_j52 = .false.
+    end if
+
     do idx_energy = 1, n_energy
         energy_scatt = energies(idx_energy)
         if (energy_scatt <= 0.0_wp) then
@@ -367,6 +388,14 @@ program compute_spin_polarization
             where (.not. active_mask)
                 phi_l0_tmp = 0.0_wp
             end where
+        end if
+
+        call enforce_wavefunction_phase(phi_l2_tmp, have_prev_l2, phi_l2_prev, active_idx, m_global)
+        if (use_two_d_channels) then
+            call enforce_wavefunction_phase(phi_l2_j52_tmp, have_prev_l2_j52, phi_l2_j52_prev, active_idx, m_global)
+        end if
+        if (need_s_wave) then
+            call enforce_wavefunction_phase(phi_l0_tmp, have_prev_l0, phi_l0_prev, active_idx, m_global)
         end if
 
         r_integral_l2 = cmplx(0.0_wp, 0.0_wp, kind=wp)
@@ -699,4 +728,37 @@ contains
         close(unit)
     end subroutine write_amplitudes_two_d
 
+    subroutine enforce_wavefunction_phase(phi_curr, has_prev, phi_prev, active_indices, weights)
+        real(wp), intent(inout) :: phi_curr(:)
+        logical, intent(inout) :: has_prev
+        real(wp), intent(inout) :: phi_prev(:)
+        integer, intent(in) :: active_indices(:)
+        real(wp), intent(in) :: weights(:)
+        real(wp) :: overlap, threshold
+        integer :: n, gidx
+
+        threshold = 1.0e-10_wp
+        if (has_prev) then
+            overlap = 0.0_wp
+            do n = 1, size(active_indices)
+                gidx = active_indices(n)
+                overlap = overlap + weights(gidx) * phi_curr(gidx) * phi_prev(gidx)
+            end do
+            if (overlap < 0.0_wp) phi_curr = -phi_curr
+        else
+            do n = 1, size(active_indices)
+                gidx = active_indices(n)
+                if (abs(phi_curr(gidx)) > threshold) then
+                    if (phi_curr(gidx) < 0.0_wp) phi_curr = -phi_curr
+                    exit
+                end if
+            end do
+            has_prev = .true.
+        end if
+
+        phi_prev = phi_curr
+        has_prev = .true.
+    end subroutine enforce_wavefunction_phase
+
 end program compute_spin_polarization
+
