@@ -9,47 +9,5 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-開発の目的
-このツールボックスは、学生がこれまで学んだ数値計算の手法をまとめてます。
-アドバイス、バグ修正、協力はいつでも大歓迎です。
-
-FEDVRの提供
-FEDVR（Finite Element Discrete Variable Representation）は、有限要素法と離散変数表現（DVR）を組み合わせた手法で、時間依存シュレーディンガー方程式、特に散乱問題の数値解に適しています。このライブラリでは、Lobatto点を使った要素分割と高精度微分行列の構築をサポートします（3次元調和振動子やクーロンポテンシャルでテスト済み）。
-散乱・時間発展手法の実装
-将来的にはS-IEM法やt-SURFF（time-dependent surface flux）などの手法を追加し、散乱位相差や光電子スペクトルの高精度解析を目指します。レーザー場中の原子や分子のダイナミクスを、誰でも計算できるオープンソースツールに育てていきます。
-原子物理学アルゴリズムの体系的整理
-多電子系の扱い、角運動量の合成、分子向けの超球座標法など、AMOでよく使うアルゴリズムを追加して、実用的なツールセットにまとめます。HF方程式やTDDFTに基づくアルゴリズムも、参考論文付きで順次追加予定です。
-参考文献と経験の共有
-各手法の理論背景などを文献リストと一緒にまとめ、学習や研究の役に立つリソースを提供します。
-
-ロードマップ
-
-現在実装中: t-SURFF法とsplit-operator法。数週間以内にFortranで完成予定です。これにより、時間依存問題の効率的なシミュレーションが可能になります。
-
-現在のコアモジュール
-
-golub_welsch.f90
-Gauss–Lobattoノードと重みを、Golub–Welschアルゴリズムで生成します。Jacobi多項式の三項漸化式を対称三重対角化し、LAPACKのdstevで固有値問題を解いて零点と直交多項式の値を求めています。
-三項漸化式を調整すれば、他の直交多項式（例: チェビシェフ多項式）にも使えます（サンプルコードを近日追加予定）。
-
-finite_element_dvr.f90
-FEDVRの基本機能を提供します：
-バリセントリック重み（ラグランジュ補間の安定計算用）
-微分行列D_ref（Lobatto点上での高精度微分）
-全体のグリッドの構築
-要素ごとの行列構築と、全体のハミルトニアン行列の組み立て
-
-IEM_DVR.f90
-R.A. Gonzalesの論文
-Gonzales, R. A., Eisert, J., Koltracht, I., Neumann, M., & Rawitscher, G. (1997). Integral equation method for the continuous spectrum radial Schrödinger equation. Journal of computational physics, 134(1), 134-149.
-を参考に,チェビシェフ点の代わりにlobatto点を用いて実装しました
-動かす際に必要なプログラムにhttps://www.fresco.org.uk/functions/barnett/index.htm で配布されているCOUL90があります.
-(自由粒子,箱型ポテンシャルで位相のずれを計算し,精度は確認済みです)
-
-
-
-前提条件
-
-Fortranコンパイラ: gfortran
-LAPACK/BLAS
-COUL90(https://www.fresco.org.uk/functions/barnett/index.htm で配布)
+FEDVR,DVR-IEM,golub_walschアルゴリズムとか色々入ってる🥹
+頑張ってつくゆ✊🥹
