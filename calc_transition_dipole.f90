@@ -11,6 +11,23 @@ program compute_spin_polarization
 
     implicit none
 
+    ! ------------------------------------------------------------------
+    ! Notes on phase conventions (see PHASE_CONVENTIONS.md)
+    !
+    ! - Canonical form used in this program for a jj-basis partial-wave
+    !   amplitude is:
+    !       A_j = C_j * exp(-i*(sigma_j + delta_j)) * R_j
+    !   where R_j is the radial overlap integral computed below and
+    !   sigma_j is the Coulomb phase returned by the DVR/IEM solver.
+    !
+    ! - Historically there was a sign-mismatch for delta in the j=3/2
+    !   channel; a temporary toggle `flip_delta_jminus` was added to
+    !   reproduce legacy outputs while the canonical form is adopted.
+    !   See PHASE_CONVENTIONS.md for guidance and the recommended
+    !   approach to remove the toggle once the canonical convention is
+    !   fully enforced across the code base.
+    ! ------------------------------------------------------------------
+
     integer, parameter :: n_per_elem = 100
     integer, parameter :: nelems = 10
     real(wp), parameter :: r_min = 0.0_wp
@@ -81,7 +98,9 @@ program compute_spin_polarization
     logical :: have_saved_wave
     complex(wp) :: weight_val, bound_val, scat_val_l2, scat_val_l0, scat_val_l2_j52
     ! Testing switches (set to .true. to try alternative conventions without deep edits)
-    logical :: flip_delta_jminus, flip_tts_signs
+    ! Note: `flip_delta_jminus` toggle removed — phases are now canonical
+    ! A_j = C_j * exp(-i*(sigma_j + delta_j)) * R_j across channels.
+    logical :: flip_tts_signs
     real(wp) :: target_energy_5p
     real(wp) :: bound_j_tot
     real(wp) :: coeff_d_j, coeff_s_j
@@ -107,13 +126,16 @@ program compute_spin_polarization
     coeff_d_j52 = 0.0_wp
     coeff_s_j = 0.0_wp
     mj_twice = 1
-    ! initialize testing switches (default: flip_delta_jminus enabled)
-    flip_delta_jminus = .true.
+    ! initialize testing switches
     flip_tts_signs = .false.
 
     ! By default disable verbose library debug output (golub_welsch, etc.).
     ! If you want to re-enable noisy DBG prints, call set_dbg(.true.) in this program
     call set_dbg(.false.)
+
+    ! If you rely on a different sign convention when porting this code,
+    ! make sure to update PHASE_CONVENTIONS.md and the comments in the
+    ! compute_tts_weights/phase assembly functions below.
 
     bound_j_tot = 0.5_wp
 
@@ -293,7 +315,7 @@ program compute_spin_polarization
     allocate(energies(n_energy), p_up_grid(n_energy), p_down_grid(n_energy), ratio_grid(n_energy))
     open(newunit=debug_unit, file=debug_filename, status='replace', action='write', form='formatted')
     ! Simplified debug header: keep only essential columns to reduce noise.
-    write(debug_unit, '(A)') '# energy(a.u.)  Re[A_up(j=3/2)]  Im[A_up(j=3/2)]  Re[A_up(j=5/2)]  Im[A_up(j=5/2)]  Re[A_down(j=3/2)]  Im[A_down(j=3/2)]  Re[A_down(j=5/2)]  Im[A_down(j=5/2)]  p_up  p_down  |A_up|^2  |A_down|^2'
+    write(debug_unit, '(A)') '# energy(a.u.)  Re[A_up(d3/2)]  Im[A_up(d3/2)]  Re[A_up(d5/2)]  Im[A_up(d5/2)]  Re[A_down(d3/2)]  Im[A_down(d3/2)]  Re[A_down(d5/2)]  Im[A_down(d5/2)]  p_up  p_down  |A_up|^2  |A_down|^2'
 
     do idx_energy = 1, n_energy
         energies(idx_energy) = min(energy_min + real(idx_energy - 1, wp) * energy_step, energy_max)
@@ -466,12 +488,9 @@ program compute_spin_polarization
             info_coulomb_l0 = 0
         end if
 
-        ! Allow an easy toggle to try the opposite sign convention for delta in the jminus channel
-        if (flip_delta_jminus) then
-            phase_l2 = cis(2.0_wp * half_pi - (sigma_l2 - delta_l2))
-        else
-            phase_l2 = cis(2.0_wp * half_pi - (sigma_l2 + delta_l2))
-        end if
+        ! Canonical phase convention: use A_j = C_j * exp(-i*(sigma + delta)) * R_j
+        ! i.e. phase = exp(-i*(sigma + delta)) which is implemented as cis(-(sigma + delta)).
+        phase_l2 = cis(-(sigma_l2 + delta_l2))
         amp_jminus = coeff_d_j * phase_l2 * r_integral_l2
 
         call compute_tts_weights(2, mj_twice, tts_up_plus, tts_up_minus, tts_down_plus, tts_down_minus)
@@ -484,7 +503,7 @@ program compute_spin_polarization
         amp_down_d_jminus = amp_jminus * tts_down_minus
 
         if (use_two_d_channels) then
-            phase_l2_j52 = cis(2.0_wp * half_pi - (sigma_l2_j52 + delta_l2_j52))
+            phase_l2_j52 = cis(-(sigma_l2_j52 + delta_l2_j52))
             amp_jplus = coeff_d_j52 * phase_l2_j52 * r_integral_l2_j52
             amp_up_d_jplus = amp_jplus * tts_up_plus
             amp_down_d_jplus = amp_jplus * tts_down_plus
@@ -750,6 +769,22 @@ contains
         real(wp) :: ell_real, mj_real
         real(wp) :: denom, rad_plus, rad_minus, coef_plus, coef_minus
 
+        ! Compute analytic jj->spin (tts) weights using CG algebra.
+        !
+        ! Convention: weights are real and normalized so that the spin basis
+        ! combination preserves total probability. The signs are chosen to
+        ! match the analytic convention used in PHASE_CONVENTIONS.md. For
+        ! ℓ=2, m_j=3/2 this yields the pattern:
+        !   up_plus =  sqrt(4/5)
+        !   up_minus = -sqrt(1/5)
+        !   down_plus = +sqrt(1/5)
+        !   down_minus = +sqrt(4/5)
+        !
+        ! The implementation below computes the general form for any ℓ and
+        ! m_j (expressed as twice the mj value in `mj_twice_val`). If you
+        ! change signs here, you must re-run `diag_reconstruct.py` to verify
+        ! that the assembled spin amplitudes match expectations.
+
         ell_real = real(ell_val, wp)
         mj_real = 0.5_wp * real(mj_twice_val, wp)
 
@@ -770,6 +805,9 @@ contains
             end if
             if (rad_minus > 0.0_wp) then
                 coef_minus = sqrt(rad_minus) / denom
+                ! The minus sign on up_minus is required by the chosen CG phase
+                ! convention (see PHASE_CONVENTIONS.md). Keep this explicit so
+                ! the mapping to spin states remains clear.
                 up_minus = -coef_minus
                 down_plus = coef_minus
             end if
@@ -785,7 +823,15 @@ contains
         real(wp) :: delta_tmp
         integer :: info_tmp
 
-        delta_off = 0.0_wp
+    ! Compute the Coulomb reference offset for this ℓ.
+    !
+    ! Convention note: the DVR/IEM solver returns a raw phase `delta_tmp`.
+    ! We take `delta_off = delta_tmp` from a reference calculation and use
+    ! `delta = delta_raw - delta_off` in the main code. This matches the
+    ! canonical form A_j = C_j * exp(-i*(sigma + delta)) * R_j used in
+    ! PHASE_CONVENTIONS.md. If another code defines `delta_raw`
+    ! differently (e.g. opposite sign), adjust the subtraction order here.
+    delta_off = 0.0_wp
         info_out = 0
         delta_tmp = 0.0_wp
         info_tmp = 0
