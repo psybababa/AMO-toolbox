@@ -1,6 +1,6 @@
-!これまでのファイルを組み合わせて,遷移双極子モーメントのエネルギースペクトラムを計算するプログラム
-!開発中なのでコメント,説明追加前
-!まだテストも一切していません
+!スピン偏極についてエネルギースペクトルをつくるサンプルコード
+!TDSEの結果と比較し,クーパー最小やjj結合の際の位相のずれによる干渉も再現するのを確認
+!ポテンシャルを変えた検証などはまだおこなっていませんが finite_element_dvrからポテンシャルを今の遮蔽クーロンポテンシャルから変更すれば動作可能だと思います
 
 program compute_spin_polarization
 
@@ -12,13 +12,15 @@ program compute_spin_polarization
     implicit none
 
     integer, parameter :: n_per_elem = 100
-    integer, parameter :: nelems = 50
+    integer, parameter :: nelems = 10
     real(wp), parameter :: r_min = 0.0_wp
     real(wp), parameter :: r_max = 500.0_wp
     real(wp), parameter :: photon_energy = 3.14_wp          ! incident photon energy (a.u.)
     real(wp), parameter :: energy_min = 2.0_wp              ! scattering energy scan lower bound (a.u.)
-    real(wp), parameter :: energy_max = 4.0_wp              ! scattering energy scan upper bound (a.u.)
-    real(wp), parameter :: energy_step = 0.001_wp            ! scattering energy increment (a.u.)
+    real(wp), parameter :: energy_max = 5.0_wp              ! scattering energy scan upper bound (a.u.)
+    real(wp), parameter :: energy_step = 0.01_wp            ! scattering energy increment (a.u.)
+    real(wp), parameter :: pi_const = acos(-1.0_wp)
+    real(wp), parameter :: half_pi = 0.5_wp * pi_const
     character(len=64) :: initial_label
     character(len=64) :: normalized_label
     character(len=64) :: output_tag
@@ -41,19 +43,33 @@ program compute_spin_polarization
     real(wp), allocatable :: phi_l2_saved(:), nodes_saved(:)
     real(wp), allocatable :: phi_l0_saved(:)
     real(wp), allocatable :: phi_l2_j52_saved(:)
-    real(wp), allocatable :: phi_l2_prev(:)
-    real(wp), allocatable :: phi_l0_prev(:)
-    real(wp), allocatable :: phi_l2_j52_prev(:)
     real(wp) :: delta_l2, delta_l0, delta_l2_j52
+    real(wp) :: delta_raw_l2, delta_raw_l0, delta_raw_l2_j52
+    real(wp) :: delta_offset_l2, delta_offset_l0
+    real(wp) :: sigma_l2, sigma_l0, sigma_l2_j52
     real(wp) :: delta_l2_saved, delta_l0_saved, delta_l2_j52_saved
+    real(wp) :: delta_raw_l2_saved, delta_raw_l0_saved, delta_raw_l2_j52_saved
+    real(wp) :: delta_offset_l2_saved, delta_offset_l0_saved, delta_offset_l2_j52_saved
+    real(wp) :: sigma_l2_saved, sigma_l0_saved, sigma_l2_j52_saved
+    real(wp) :: residual_l2, residual_l0, residual_l2_j52
+    real(wp) :: so_factor_l2, so_factor_l0, so_factor_l2_j52
     real(wp) :: norm_val, energy_bound
     real(wp) :: r_value, centrifugal_term
     complex(wp) :: r_integral_l2, r_integral_l0, r_integral_l2_j52
     complex(wp) :: amp_up_l2, amp_up_l0, amp_down_l2
-    complex(wp) :: amp_up_l2_j52, amp_down_l2_j52
-    complex(wp) :: pref_up_l2, pref_up_l0, pref_down_l2
-    complex(wp) :: pref_up_l2_j52, pref_down_l2_j52
+    complex(wp) :: amp_up_l2_j52, amp_down_l2_j52, amp_down_l0
+    complex(wp) :: phase_l2, phase_l0, phase_l2_j52
+    complex(wp) :: amp_jminus, amp_jplus, amp_s
+    complex(wp) :: amp_up_d_jminus, amp_down_d_jminus
+    complex(wp) :: amp_up_d_jplus, amp_down_d_jplus
+    complex(wp) :: amp_up_total, amp_down_total
     real(wp) :: p_up_val, p_down_val, ratio_val
+    real(wp) :: overlap_delta_mag, overlap_ratio_mod
+    real(wp) :: up_d5_re, up_d5_im, down_d5_re, down_d5_im
+    real(wp) :: up_s_re, up_s_im
+    real(wp) :: mag_d5, mag_s
+    real(wp) :: residual_d5, residual_s
+    real(wp) :: so_factor_d5, so_factor_s
     real(wp) :: energy_scatt, target_energy, best_diff
     integer :: elem_map(nelems, n_per_elem)
     integer :: n_global, info, lwork, idx, n_active
@@ -63,30 +79,43 @@ program compute_spin_polarization
     real(wp) :: k_scatt
     real(wp), parameter :: node_tol = 1.0e-8_wp
     logical :: have_saved_wave
-    logical :: have_prev_l2
-    logical :: have_prev_l0
-    logical :: have_prev_l2_j52
     complex(wp) :: weight_val, bound_val, scat_val_l2, scat_val_l0, scat_val_l2_j52
+    ! Testing switches (set to .true. to try alternative conventions without deep edits)
+    logical :: flip_delta_jminus, flip_tts_signs
     real(wp) :: target_energy_5p
+    real(wp) :: bound_j_tot
     real(wp) :: coeff_d_j, coeff_s_j
     real(wp) :: coeff_d_j52
+    real(wp) :: tts_up_plus, tts_up_minus, tts_down_plus, tts_down_minus
+    real(wp) :: tts_up_plus_s, tts_up_minus_s, tts_down_plus_s, tts_down_minus_s
+    integer :: mj_twice
     logical :: use_two_d_channels
     logical :: need_s_wave
     character(len=256) :: spectrum_filename, amplitude_filename
+    character(len=256) :: debug_filename
+    integer :: debug_unit, info_coulomb_l2, info_coulomb_l0
 
     argument_buffer = ''
     call get_command_argument(1, argument_buffer)
     initial_label = trim(argument_buffer)
-    if (len_trim(initial_label) == 0) initial_label = 'j32_m32'
+    if (len_trim(initial_label) == 0) initial_label = 'j32_m12'
     normalized_label = to_lower(trim(adjustl(initial_label)))
 
     use_two_d_channels = .false.
     need_s_wave = .false.
-    pref_up_l2 = cmplx(0.0_wp, 0.0_wp, kind=wp)
-    pref_down_l2 = cmplx(0.0_wp, 0.0_wp, kind=wp)
-    pref_up_l0 = cmplx(0.0_wp, 0.0_wp, kind=wp)
-    pref_up_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
-    pref_down_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
+    coeff_d_j = 0.0_wp
+    coeff_d_j52 = 0.0_wp
+    coeff_s_j = 0.0_wp
+    mj_twice = 1
+    ! initialize testing switches (default: flip_delta_jminus enabled)
+    flip_delta_jminus = .true.
+    flip_tts_signs = .false.
+
+    ! By default disable verbose library debug output (golub_welsch, etc.).
+    ! If you want to re-enable noisy DBG prints, call set_dbg(.true.) in this program
+    call set_dbg(.false.)
+
+    bound_j_tot = 0.5_wp
 
     select case (normalized_label)
     case ('5p1/2', 'j12_m12', 'j=1/2,m=1/2')
@@ -94,36 +123,31 @@ program compute_spin_polarization
         target_energy_5p = -0.446_wp
         coeff_d_j = sqrt(2.0_wp) / 3.0_wp
         coeff_s_j = -1.0_wp / 3.0_wp
-        pref_up_l2 = cmplx(-sqrt(2.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
-        pref_down_l2 = cmplx(sqrt(3.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
-        pref_up_l0 = cmplx(coeff_s_j, 0.0_wp, kind=wp)
+        coeff_d_j52 = 0.0_wp
         need_s_wave = .true.
+    mj_twice = 1
         output_tag = 'j12_m12'
     case ('5p3/2', 'j32_m12', 'j=3/2,m=1/2')
         ! 5p_{3/2}, m_j = +1/2 → εd_{3/2}, εd_{5/2}, εs_{1/2}
         target_energy_5p = -0.439_wp
+        bound_j_tot = 1.5_wp
         coeff_d_j = -1.0_wp / 15.0_wp
         coeff_d_j52 = sqrt(6.0_wp) / 5.0_wp
         coeff_s_j = sqrt(2.0_wp) / 3.0_wp
-        pref_up_l2 = cmplx(-sqrt(2.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
-        pref_down_l2 = cmplx(sqrt(3.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
-        pref_up_l2_j52 = cmplx(sqrt(3.0_wp/5.0_wp) * coeff_d_j52, 0.0_wp, kind=wp)
-        pref_down_l2_j52 = cmplx(sqrt(2.0_wp/5.0_wp) * coeff_d_j52, 0.0_wp, kind=wp)
-        pref_up_l0 = cmplx(coeff_s_j, 0.0_wp, kind=wp)
         use_two_d_channels = .true.
         need_s_wave = .true.
+    mj_twice = 1
         output_tag = 'j32_m12'
     case ('j32_m32', 'j=3/2,m=3/2')
         ! 5p_{3/2}, m_j = +3/2 → εd_{3/2}, εd_{5/2}
         target_energy_5p = -0.439_wp
+        bound_j_tot = 1.5_wp
         coeff_d_j = -1.0_wp / 5.0_wp
         coeff_d_j52 = 2.0_wp / 5.0_wp
-        pref_up_l2 = cmplx(-sqrt(1.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
-        pref_down_l2 = cmplx(sqrt(4.0_wp/5.0_wp) * coeff_d_j, 0.0_wp, kind=wp)
-        pref_up_l2_j52 = cmplx(sqrt(4.0_wp/5.0_wp) * coeff_d_j52, 0.0_wp, kind=wp)
-        pref_down_l2_j52 = cmplx(sqrt(1.0_wp/5.0_wp) * coeff_d_j52, 0.0_wp, kind=wp)
+    coeff_s_j = 0.0_wp
         use_two_d_channels = .true.
         need_s_wave = .false.
+        mj_twice = 3
         output_tag = 'j32_m32'
     case default
         print '(A)', 'ERROR: Unsupported initial state label: '//trim(initial_label)
@@ -133,6 +157,7 @@ program compute_spin_polarization
 
     spectrum_filename = 'spin_pol_'//trim(output_tag)//'_spectrum.dat'
     amplitude_filename = 'spin_pol_'//trim(output_tag)//'_amplitudes.dat'
+    debug_filename = 'spin_pol_'//trim(output_tag)//'_debug.dat'
 
     ! Build FEDVR grid
     allocate(x_ref(n_per_elem), w_ref(n_per_elem))
@@ -174,7 +199,7 @@ program compute_spin_polarization
     end if
 
     allocate(v_core(n_global), v_eff(n_global))
-    call build_potential_diag(n_global, x_global, v_core, 1, 0.5_wp, 1, info)
+    call build_potential_diag(n_global, x_global, v_core, 1, bound_j_tot, 1, info)
     if (info /= 0) then
         print '(A,I0)', 'build_potential_diag failed for bound state, info = ', info
         stop 1
@@ -266,6 +291,10 @@ program compute_spin_polarization
     if (n_energy < 1) n_energy = 1
 
     allocate(energies(n_energy), p_up_grid(n_energy), p_down_grid(n_energy), ratio_grid(n_energy))
+    open(newunit=debug_unit, file=debug_filename, status='replace', action='write', form='formatted')
+    ! Simplified debug header: keep only essential columns to reduce noise.
+    write(debug_unit, '(A)') '# energy(a.u.)  Re[A_up(j=3/2)]  Im[A_up(j=3/2)]  Re[A_up(j=5/2)]  Im[A_up(j=5/2)]  Re[A_down(j=3/2)]  Im[A_down(j=3/2)]  Re[A_down(j=5/2)]  Im[A_down(j=5/2)]  p_up  p_down  |A_up|^2  |A_down|^2'
+
     do idx_energy = 1, n_energy
         energies(idx_energy) = min(energy_min + real(idx_energy - 1, wp) * energy_step, energy_max)
     end do
@@ -292,21 +321,15 @@ program compute_spin_polarization
     delta_l2_saved = 0.0_wp
     delta_l0_saved = 0.0_wp
     delta_l2_j52_saved = 0.0_wp
-
-    allocate(phi_l2_prev(n_global))
-    have_prev_l2 = .false.
-    if (need_s_wave) then
-        allocate(phi_l0_prev(n_global))
-        have_prev_l0 = .false.
-    else
-        have_prev_l0 = .false.
-    end if
-    if (use_two_d_channels) then
-        allocate(phi_l2_j52_prev(n_global))
-        have_prev_l2_j52 = .false.
-    else
-        have_prev_l2_j52 = .false.
-    end if
+    delta_raw_l2_saved = 0.0_wp
+    delta_raw_l0_saved = 0.0_wp
+    delta_raw_l2_j52_saved = 0.0_wp
+    delta_offset_l2_saved = 0.0_wp
+    delta_offset_l0_saved = 0.0_wp
+    delta_offset_l2_j52_saved = 0.0_wp
+    sigma_l2_saved = 0.0_wp
+    sigma_l0_saved = 0.0_wp
+    sigma_l2_j52_saved = 0.0_wp
 
     do idx_energy = 1, n_energy
         energy_scatt = energies(idx_energy)
@@ -316,8 +339,9 @@ program compute_spin_polarization
 
         k_scatt = sqrt(2.0_wp * energy_scatt)
 
-        call dvr_iem_solve(nelems, n_per_elem, r_max, k_scatt, 2, 1, 1.5_wp, &
-                           phi_l2_tmp, nodes_l2_tmp, delta_l2, info)
+     call dvr_iem_solve(nelems, n_per_elem, r_max, k_scatt, 2, 1, 1.5_wp, &
+         phi_l2_tmp, nodes_l2_tmp, delta_raw_l2, info, residual_out=residual_l2, &
+         so_factor_out=so_factor_l2, coulomb_sigma_out=sigma_l2)
         if (info /= 0) then
             print '(A,I0)', 'dvr_iem_solve failed for l=2, j=3/2, info = ', info
             stop 1
@@ -325,22 +349,34 @@ program compute_spin_polarization
 
         if (use_two_d_channels) then
             call dvr_iem_solve(nelems, n_per_elem, r_max, k_scatt, 2, 1, 2.5_wp, &
-                               phi_l2_j52_tmp, nodes_l2_j52_tmp, delta_l2_j52, info)
+                               phi_l2_j52_tmp, nodes_l2_j52_tmp, delta_raw_l2_j52, info, &
+                               residual_out=residual_l2_j52, so_factor_out=so_factor_l2_j52, &
+                               coulomb_sigma_out=sigma_l2_j52)
             if (info /= 0) then
                 print '(A,I0)', 'dvr_iem_solve failed for l=2, j=5/2, info = ', info
                 stop 1
             end if
+        else
+            residual_l2_j52 = 0.0_wp
+            so_factor_l2_j52 = 0.0_wp
+            sigma_l2_j52 = 0.0_wp
+            delta_raw_l2_j52 = 0.0_wp
         end if
 
         if (need_s_wave) then
             call dvr_iem_solve(nelems, n_per_elem, r_max, k_scatt, 0, 1, 0.5_wp, &
-                               phi_l0_tmp, nodes_l0_tmp, delta_l0, info)
+                               phi_l0_tmp, nodes_l0_tmp, delta_raw_l0, info, residual_out=residual_l0, &
+                               so_factor_out=so_factor_l0, coulomb_sigma_out=sigma_l0)
             if (info /= 0) then
                 print '(A,I0)', 'dvr_iem_solve failed for l=0, j=1/2, info = ', info
                 stop 1
             end if
         else
             delta_l0 = 0.0_wp
+            residual_l0 = 0.0_wp
+            so_factor_l0 = 0.0_wp
+            sigma_l0 = 0.0_wp
+            delta_raw_l0 = 0.0_wp
         end if
 
         if (size(phi_l2_tmp) /= n_global) then
@@ -390,14 +426,6 @@ program compute_spin_polarization
             end where
         end if
 
-        call enforce_wavefunction_phase(phi_l2_tmp, have_prev_l2, phi_l2_prev, active_idx, m_global)
-        if (use_two_d_channels) then
-            call enforce_wavefunction_phase(phi_l2_j52_tmp, have_prev_l2_j52, phi_l2_j52_prev, active_idx, m_global)
-        end if
-        if (need_s_wave) then
-            call enforce_wavefunction_phase(phi_l0_tmp, have_prev_l0, phi_l0_prev, active_idx, m_global)
-        end if
-
         r_integral_l2 = cmplx(0.0_wp, 0.0_wp, kind=wp)
         r_integral_l0 = cmplx(0.0_wp, 0.0_wp, kind=wp)
         r_integral_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
@@ -405,31 +433,97 @@ program compute_spin_polarization
             weight_val = cmplx(m_global(active_idx(i)), 0.0_wp, kind=wp)
             bound_val = cmplx(u_bound(active_idx(i)), 0.0_wp, kind=wp)
             scat_val_l2 = cmplx(phi_l2_tmp(active_idx(i)), 0.0_wp, kind=wp)
-            r_integral_l2 = r_integral_l2 + weight_val * conjg(bound_val) * scat_val_l2
+            r_value = x_global(active_idx(i))
+            r_integral_l2 = r_integral_l2 + weight_val * cmplx(r_value, 0.0_wp, kind=wp) * conjg(bound_val) * scat_val_l2
             if (need_s_wave) then
                 scat_val_l0 = cmplx(phi_l0_tmp(active_idx(i)), 0.0_wp, kind=wp)
-                r_integral_l0 = r_integral_l0 + weight_val * conjg(bound_val) * scat_val_l0
+                r_integral_l0 = r_integral_l0 + weight_val * cmplx(r_value, 0.0_wp, kind=wp) * conjg(bound_val) * scat_val_l0
             end if
             if (use_two_d_channels) then
                 scat_val_l2_j52 = cmplx(phi_l2_j52_tmp(active_idx(i)), 0.0_wp, kind=wp)
-                r_integral_l2_j52 = r_integral_l2_j52 + weight_val * conjg(bound_val) * scat_val_l2_j52
+                r_integral_l2_j52 = r_integral_l2_j52 + weight_val * cmplx(r_value, 0.0_wp, kind=wp) * conjg(bound_val) * scat_val_l2_j52
             end if
         end do
 
-        amp_up_l2 = pref_up_l2 * cis(delta_l2) * r_integral_l2
-        amp_down_l2 = pref_down_l2 * cis(delta_l2) * r_integral_l2
-        if (need_s_wave) then
-            amp_up_l0 = pref_up_l0 * cis(delta_l0) * r_integral_l0
-        else
-            amp_up_l0 = cmplx(0.0_wp, 0.0_wp, kind=wp)
-        end if
+    info_coulomb_l2 = 0
+    call compute_coulomb_offset(2, delta_offset_l2, info_coulomb_l2)
+    if (info_coulomb_l2 /= 0) delta_offset_l2 = 0.0_wp
+
+        delta_l2 = delta_raw_l2 - delta_offset_l2
         if (use_two_d_channels) then
-            amp_up_l2_j52 = pref_up_l2_j52 * cis(delta_l2_j52) * r_integral_l2_j52
-            amp_down_l2_j52 = pref_down_l2_j52 * cis(delta_l2_j52) * r_integral_l2_j52
+            delta_l2_j52 = delta_raw_l2_j52 - delta_offset_l2
+        else
+            delta_l2_j52 = 0.0_wp
+        end if
+
+        if (need_s_wave) then
+            call compute_coulomb_offset(0, delta_offset_l0, info_coulomb_l0)
+            if (info_coulomb_l0 /= 0) delta_offset_l0 = 0.0_wp
+            delta_l0 = delta_raw_l0 - delta_offset_l0
+        else
+            delta_l0 = 0.0_wp
+            delta_offset_l0 = 0.0_wp
+            info_coulomb_l0 = 0
+        end if
+
+        ! Allow an easy toggle to try the opposite sign convention for delta in the jminus channel
+        if (flip_delta_jminus) then
+            phase_l2 = cis(2.0_wp * half_pi - (sigma_l2 - delta_l2))
+        else
+            phase_l2 = cis(2.0_wp * half_pi - (sigma_l2 + delta_l2))
+        end if
+        amp_jminus = coeff_d_j * phase_l2 * r_integral_l2
+
+        call compute_tts_weights(2, mj_twice, tts_up_plus, tts_up_minus, tts_down_plus, tts_down_minus)
+        ! Optional quick flip of sign-convention for tts weights to test alternative CG sign choices
+        if (flip_tts_signs) then
+            tts_up_minus = -tts_up_minus
+            tts_down_plus = -tts_down_plus
+        end if
+        amp_up_d_jminus = amp_jminus * tts_up_minus
+        amp_down_d_jminus = amp_jminus * tts_down_minus
+
+        if (use_two_d_channels) then
+            phase_l2_j52 = cis(2.0_wp * half_pi - (sigma_l2_j52 + delta_l2_j52))
+            amp_jplus = coeff_d_j52 * phase_l2_j52 * r_integral_l2_j52
+            amp_up_d_jplus = amp_jplus * tts_up_plus
+            amp_down_d_jplus = amp_jplus * tts_down_plus
+        else
+            phase_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
+            amp_jplus = cmplx(0.0_wp, 0.0_wp, kind=wp)
+            amp_up_d_jplus = cmplx(0.0_wp, 0.0_wp, kind=wp)
+            amp_down_d_jplus = cmplx(0.0_wp, 0.0_wp, kind=wp)
+        end if
+
+        amp_up_l2 = amp_up_d_jminus
+        amp_down_l2 = amp_down_d_jminus
+        if (use_two_d_channels) then
+            amp_up_l2_j52 = amp_up_d_jplus
+            amp_down_l2_j52 = amp_down_d_jplus
         else
             amp_up_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
             amp_down_l2_j52 = cmplx(0.0_wp, 0.0_wp, kind=wp)
         end if
+
+        if (need_s_wave) then
+            phase_l0 = cis(-(sigma_l0 + delta_l0))
+            amp_s = coeff_s_j * phase_l0 * r_integral_l0
+            call compute_tts_weights(0, mj_twice, tts_up_plus_s, tts_up_minus_s, tts_down_plus_s, tts_down_minus_s)
+            amp_up_l0 = amp_s * tts_up_plus_s
+            amp_down_l0 = amp_s * tts_down_plus_s
+        else
+            amp_up_l0 = cmplx(0.0_wp, 0.0_wp, kind=wp)
+            amp_down_l0 = cmplx(0.0_wp, 0.0_wp, kind=wp)
+        end if
+
+        amp_up_total = amp_up_l2 + amp_up_l2_j52
+        amp_down_total = amp_down_l2 + amp_down_l2_j52
+
+        p_up_val = abs(amp_up_total)**2
+        if (need_s_wave) p_up_val = p_up_val + abs(amp_up_l0)**2
+
+        p_down_val = abs(amp_down_total)**2
+        if (need_s_wave) p_down_val = p_down_val + abs(amp_down_l0)**2
 
         amp_up_l2_grid(idx_energy) = amp_up_l2
         amp_down_l2_grid(idx_energy) = amp_down_l2
@@ -439,16 +533,6 @@ program compute_spin_polarization
         end if
         if (need_s_wave) then
             amp_up_l0_grid(idx_energy) = amp_up_l0
-        end if
-
-        if (use_two_d_channels) then
-            p_up_val = abs(amp_up_l2 + amp_up_l2_j52)**2
-            if (need_s_wave) p_up_val = p_up_val + abs(amp_up_l0)**2
-            p_down_val = abs(amp_down_l2 + amp_down_l2_j52)**2
-        else
-            p_up_val = abs(amp_up_l2)**2
-            if (need_s_wave) p_up_val = p_up_val + abs(amp_up_l0)**2
-            p_down_val = abs(amp_down_l2)**2
         end if
 
         if (p_down_val > 0.0_wp) then
@@ -461,12 +545,61 @@ program compute_spin_polarization
         p_down_grid(idx_energy) = p_down_val
         ratio_grid(idx_energy) = ratio_val
 
+        if (use_two_d_channels) then
+            overlap_delta_mag = abs(r_integral_l2 - r_integral_l2_j52)
+            overlap_ratio_mod = abs(r_integral_l2) / max(abs(r_integral_l2_j52), 1.0e-12_wp)
+            up_d5_re = real(amp_up_l2_j52)
+            up_d5_im = aimag(amp_up_l2_j52)
+            down_d5_re = real(amp_down_l2_j52)
+            down_d5_im = aimag(amp_down_l2_j52)
+            mag_d5 = abs(r_integral_l2_j52)
+            residual_d5 = residual_l2_j52
+            so_factor_d5 = so_factor_l2_j52
+        else
+            overlap_delta_mag = 0.0_wp
+            overlap_ratio_mod = 0.0_wp
+            up_d5_re = 0.0_wp
+            up_d5_im = 0.0_wp
+            down_d5_re = 0.0_wp
+            down_d5_im = 0.0_wp
+            mag_d5 = 0.0_wp
+            residual_d5 = 0.0_wp
+            so_factor_d5 = 0.0_wp
+        end if
+
+        if (need_s_wave) then
+            up_s_re = real(amp_up_l0)
+            up_s_im = aimag(amp_up_l0)
+            mag_s = abs(r_integral_l0)
+            residual_s = residual_l0
+            so_factor_s = so_factor_l0
+        else
+            up_s_re = 0.0_wp
+            up_s_im = 0.0_wp
+            mag_s = 0.0_wp
+            residual_s = 0.0_wp
+            so_factor_s = 0.0_wp
+        end if
+
         if (abs(energy_scatt - target_energy) < best_diff) then
             best_diff = abs(energy_scatt - target_energy)
             ref_index = idx_energy
             delta_l2_saved = delta_l2
-            if (need_s_wave) delta_l0_saved = delta_l0
-            if (use_two_d_channels) delta_l2_j52_saved = delta_l2_j52
+            delta_raw_l2_saved = delta_raw_l2
+            delta_offset_l2_saved = delta_offset_l2
+            if (need_s_wave) then
+                delta_l0_saved = delta_l0
+                delta_raw_l0_saved = delta_raw_l0
+                delta_offset_l0_saved = delta_offset_l0
+            end if
+            if (use_two_d_channels) then
+                delta_l2_j52_saved = delta_l2_j52
+                delta_raw_l2_j52_saved = delta_raw_l2_j52
+                delta_offset_l2_j52_saved = delta_offset_l2
+            end if
+            sigma_l2_saved = sigma_l2
+            if (need_s_wave) sigma_l0_saved = sigma_l0
+            if (use_two_d_channels) sigma_l2_j52_saved = sigma_l2_j52
             if (.not. allocated(phi_l2_saved)) then
                 if (use_two_d_channels .and. need_s_wave) then
                     allocate(phi_l2_saved(n_global), phi_l0_saved(n_global), phi_l2_j52_saved(n_global), nodes_saved(n_global))
@@ -485,6 +618,14 @@ program compute_spin_polarization
             have_saved_wave = .true.
         end if
 
+        ! Write a compact per-energy debug line (essential amplitude components + probabilities)
+        write(debug_unit, '(1pe22.14,12(1x,1pe22.14))') energy_scatt, &
+            real(amp_up_l2), aimag(amp_up_l2), &
+            real(amp_up_l2_j52), aimag(amp_up_l2_j52), &
+            real(amp_down_l2), aimag(amp_down_l2), &
+            real(amp_down_l2_j52), aimag(amp_down_l2_j52), &
+            p_up_val, p_down_val, abs(amp_up_total)**2, abs(amp_down_total)**2
+
         if (use_two_d_channels .and. need_s_wave) then
             deallocate(phi_l2_tmp, nodes_l2_tmp, phi_l0_tmp, nodes_l0_tmp, phi_l2_j52_tmp, nodes_l2_j52_tmp)
         else if (use_two_d_channels) then
@@ -495,6 +636,8 @@ program compute_spin_polarization
             deallocate(phi_l2_tmp, nodes_l2_tmp)
         end if
     end do
+
+    close(debug_unit)
 
     call write_wavefunction('bound_wavefunction_'//trim(output_tag)//'.dat', x_global, u_bound)
     if (have_saved_wave) then
@@ -531,11 +674,24 @@ program compute_spin_polarization
     if (ref_index > 0) then
         print '(A,1pe15.6)', ' Reference energy (a.u.)    : ', energies(ref_index)
         print '(A,1pe15.6)', ' delta_{3/2} (rad)          : ', delta_l2_saved
+        print '(A,1pe15.6)', ' delta_raw_{3/2} (rad)      : ', delta_raw_l2_saved
+        print '(A,1pe15.6)', ' delta_ref_{3/2} (rad)      : ', delta_offset_l2_saved
         if (use_two_d_channels) then
             print '(A,1pe15.6)', ' delta_{5/2} (rad)          : ', delta_l2_j52_saved
+            print '(A,1pe15.6)', ' delta_raw_{5/2} (rad)      : ', delta_raw_l2_j52_saved
+            print '(A,1pe15.6)', ' delta_ref_{5/2} (rad)      : ', delta_offset_l2_j52_saved
         end if
         if (need_s_wave) then
             print '(A,1pe15.6)', ' delta_{1/2} (rad)          : ', delta_l0_saved
+            print '(A,1pe15.6)', ' delta_raw_{1/2} (rad)      : ', delta_raw_l0_saved
+            print '(A,1pe15.6)', ' delta_ref_{1/2} (rad)      : ', delta_offset_l0_saved
+        end if
+        print '(A,1pe15.6)', ' sigma_{3/2} (rad)          : ', sigma_l2_saved
+        if (use_two_d_channels) then
+            print '(A,1pe15.6)', ' sigma_{5/2} (rad)          : ', sigma_l2_j52_saved
+        end if
+        if (need_s_wave) then
+            print '(A,1pe15.6)', ' sigma_{1/2} (rad)          : ', sigma_l0_saved
         end if
         print '(A,1pe15.6)', ' P_up(reference)            : ', p_up_grid(ref_index)
         print '(A,1pe15.6)', ' P_down(reference)          : ', p_down_grid(ref_index)
@@ -586,6 +742,67 @@ contains
         real(wp), intent(in) :: angle
         cis = cmplx(cos(angle), sin(angle), kind=wp)
     end function cis
+
+    pure subroutine compute_tts_weights(ell_val, mj_twice_val, up_plus, up_minus, down_plus, down_minus)
+        integer, intent(in) :: ell_val
+        integer, intent(in) :: mj_twice_val
+        real(wp), intent(out) :: up_plus, up_minus, down_plus, down_minus
+        real(wp) :: ell_real, mj_real
+        real(wp) :: denom, rad_plus, rad_minus, coef_plus, coef_minus
+
+        ell_real = real(ell_val, wp)
+        mj_real = 0.5_wp * real(mj_twice_val, wp)
+
+        denom = sqrt(max(0.0_wp, 2.0_wp * ell_real + 1.0_wp))
+        rad_plus = max(0.0_wp, ell_real + mj_real + 0.5_wp)
+        rad_minus = max(0.0_wp, ell_real - mj_real + 0.5_wp)
+
+        up_plus = 0.0_wp
+        up_minus = 0.0_wp
+        down_plus = 0.0_wp
+        down_minus = 0.0_wp
+
+        if (denom > 0.0_wp) then
+            if (rad_plus > 0.0_wp) then
+                coef_plus = sqrt(rad_plus) / denom
+                up_plus = coef_plus
+                down_minus = coef_plus
+            end if
+            if (rad_minus > 0.0_wp) then
+                coef_minus = sqrt(rad_minus) / denom
+                up_minus = -coef_minus
+                down_plus = coef_minus
+            end if
+        end if
+    end subroutine compute_tts_weights
+
+    subroutine compute_coulomb_offset(ell_val, delta_off, info_out)
+        integer, intent(in) :: ell_val
+        real(wp), intent(out) :: delta_off
+        integer, intent(out) :: info_out
+
+        real(wp), allocatable :: sol_ref(:), nodes_ref(:)
+        real(wp) :: delta_tmp
+        integer :: info_tmp
+
+        delta_off = 0.0_wp
+        info_out = 0
+        delta_tmp = 0.0_wp
+        info_tmp = 0
+
+        call dvr_iem_solve(nelems, n_per_elem, r_max, k_scatt, ell_val, 0, 0.5_wp, &
+                            sol_ref, nodes_ref, delta_tmp, info_tmp, potential_model=2)
+
+        if (info_tmp == 0) then
+            delta_off = delta_tmp
+        else
+            delta_off = 0.0_wp
+        end if
+        info_out = info_tmp
+
+        if (allocated(sol_ref)) deallocate(sol_ref)
+        if (allocated(nodes_ref)) deallocate(nodes_ref)
+    end subroutine compute_coulomb_offset
 
     pure function to_lower(input) result(output)
         character(len=*), intent(in) :: input
@@ -728,37 +945,4 @@ contains
         close(unit)
     end subroutine write_amplitudes_two_d
 
-    subroutine enforce_wavefunction_phase(phi_curr, has_prev, phi_prev, active_indices, weights)
-        real(wp), intent(inout) :: phi_curr(:)
-        logical, intent(inout) :: has_prev
-        real(wp), intent(inout) :: phi_prev(:)
-        integer, intent(in) :: active_indices(:)
-        real(wp), intent(in) :: weights(:)
-        real(wp) :: overlap, threshold
-        integer :: n, gidx
-
-        threshold = 1.0e-10_wp
-        if (has_prev) then
-            overlap = 0.0_wp
-            do n = 1, size(active_indices)
-                gidx = active_indices(n)
-                overlap = overlap + weights(gidx) * phi_curr(gidx) * phi_prev(gidx)
-            end do
-            if (overlap < 0.0_wp) phi_curr = -phi_curr
-        else
-            do n = 1, size(active_indices)
-                gidx = active_indices(n)
-                if (abs(phi_curr(gidx)) > threshold) then
-                    if (phi_curr(gidx) < 0.0_wp) phi_curr = -phi_curr
-                    exit
-                end if
-            end do
-            has_prev = .true.
-        end if
-
-        phi_prev = phi_curr
-        has_prev = .true.
-    end subroutine enforce_wavefunction_phase
-
 end program compute_spin_polarization
-
