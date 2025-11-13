@@ -13,9 +13,12 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 主な特徴
 
-多様なアルゴリズム: FEDVR（Finite Element Discrete Variable Representation）、DVR-IEM（Discrete Variable Representation with Integral Equation Method）、Golub-Welschアルゴリズムなど。
-AMO物理特化: 散乱計算、遷移双極子、クーロン関数、スピン軌道相互作用などのサンプル。
+多様なアルゴリズム: FEDVR（Finite Element Discrete Variable Representation）、DVR-IEM（Discrete Variable Representation with Integral Equation Method）、Golub-Welschアルゴリズムなど
+
+AMO物理特化: 散乱計算、遷移双極子、クーロン関数、スピン軌道相互作用などのサンプル
+
 教育・研究向け: 各コードに詳細なコメントを付け、理論背景と参考文献の記載
+
 拡張性: 標準的なFortranで書かれ、gfortranなどのコンパイラで容易にビルド可能。
 
 依存関係
