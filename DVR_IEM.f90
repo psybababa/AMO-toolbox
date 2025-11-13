@@ -47,7 +47,9 @@ module dvr_integral_equation_methods
 
 contains
 
-    subroutine dvr_iem_solve(nelems, nloc, r_max, k_wave, ell, key_soi, j_tot, solution, nodes, phase_shift, info, potential_model, residual_out, so_factor_out)
+    subroutine dvr_iem_solve(nelems, nloc, r_max, k_wave, ell, key_soi, j_tot, solution, nodes, phase_shift, info, &
+                             potential_model, residual_out, so_factor_out, coulomb_sigma_out, phi_tail_out, dphi_tail_out, &
+                             eta_out)
         ! High-level driver for the Gonzales-style DVR-IEM solver.
         ! nelems   : number of FEDVR elements
         ! nloc     : local Lobatto points per element
@@ -66,6 +68,10 @@ contains
     integer, intent(in), optional :: potential_model
     real(wp), intent(out), optional :: residual_out
     real(wp), intent(out), optional :: so_factor_out
+    real(wp), intent(out), optional :: coulomb_sigma_out
+    real(wp), intent(out), optional :: phi_tail_out
+    real(wp), intent(out), optional :: dphi_tail_out
+    real(wp), intent(out), optional :: eta_out
         real(wp), intent(in) :: r_max, k_wave, j_tot
         real(wp), allocatable, intent(out) :: solution(:), nodes(:)
         real(wp), intent(out) :: phase_shift
@@ -90,6 +96,7 @@ contains
     real(wp) :: proj_num, proj_den
     real(wp) :: flux_residual
         real(wp) :: numer, denom
+        real(wp) :: sigma_tail, dummy_ga
         integer :: ifail
         integer :: pot_model
         real(wp), allocatable, target :: fc(:), gc(:), fcp(:), gcp(:)
@@ -165,6 +172,11 @@ contains
             end if
         case (1)
             V_global = 0.0_wp
+        case (2)
+            do i = 1, N_global
+                val = max(x_global(i), 1.0e-12_wp)
+                V_global(i) = -1.0_wp / val
+            end do
         case default
             info = -30
             return
@@ -407,7 +419,13 @@ contains
     rho_tail = k_wave * nodes(N_global)
     r_tail = max(nodes(N_global), 1.0e-8_wp)
     z_tail = -V_global(N_global) * r_tail
-    eta_tail = -z_tail / k_wave
+    eta_tail = z_tail / k_wave
+    sigma_tail = 0.0_wp
+    dummy_ga = 0.0_wp
+
+    if (ell >= 0) then
+        call COULGA(real(ell + 1, wp), eta_tail, dummy_ga, sigma_tail)
+    end if
 
         allocate(fc(0:ell), gc(0:ell), fcp(0:ell), gcp(0:ell), stat=ierr)
         if (ierr /= 0) then
@@ -440,6 +458,10 @@ contains
 
     flux_residual = abs(phi_T * gcp(ell) - phi_prime_T * gc(ell))
     if (present(residual_out)) residual_out = flux_residual
+    if (present(coulomb_sigma_out)) coulomb_sigma_out = sigma_tail
+    if (present(phi_tail_out)) phi_tail_out = phi_T
+    if (present(dphi_tail_out)) dphi_tail_out = phi_prime_T
+    if (present(eta_out)) eta_out = eta_tail
 
     deallocate(phi_local)
         deallocate(block_matrix, block_rhs, ipiv)
