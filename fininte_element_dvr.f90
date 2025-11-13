@@ -463,29 +463,32 @@ end subroutine assemble_global_matrices
         real(wp), allocatable :: x_ref_first(:), w_ref_first(:)
 
         ierr = 0
+        ! Diagnostic prints are guarded by the shared dbg flag from golub_welsch.
+        if (dbg_enabled) then
             ! Debug: dump entry-state
             print '(A)', 'DBG(build_global_grid) ENTRY'
             print '(A,I0)', ' DBG: nelems=', nelems
             print '(A,I0)', ' DBG: N=', N
             print '(A,I0)', ' DBG: size(x_ref)=', size(x_ref)
             print '(A,I0)', ' DBG: size(w_ref)=', size(w_ref)
-                print '(A,I0)', ' DBG: size(x_ref)=', size(x_ref)
-                print '(A,I0)', ' DBG: size(w_ref)=', size(w_ref)
-                if (size(x_global) > 0) then
-                    print '(A,I0)', ' DBG: size(x_global)=', size(x_global)
-                else
-                    print '(A)', ' DBG: x_global size is 0'
-                end if
-                if (size(M_global) > 0) then
-                    print '(A,I0)', ' DBG: size(M_global)=', size(M_global)
-                else
-                    print '(A)', ' DBG: M_global size is 0'
-                end if
-                if (size(elem_map,1) > 0 .and. size(elem_map,2) > 0) then
-                    print '(A,I0,A,I0)', ' DBG: size(elem_map)=', size(elem_map,1), ',', size(elem_map,2)
-                else
-                    print '(A)', ' DBG: elem_map size is zero in at least one dimension'
-                end if
+            print '(A,I0)', ' DBG: size(x_ref)=', size(x_ref)
+            print '(A,I0)', ' DBG: size(w_ref)=', size(w_ref)
+            if (size(x_global) > 0) then
+                print '(A,I0)', ' DBG: size(x_global)=', size(x_global)
+            else
+                print '(A)', ' DBG: x_global size is 0'
+            end if
+            if (size(M_global) > 0) then
+                print '(A,I0)', ' DBG: size(M_global)=', size(M_global)
+            else
+                print '(A)', ' DBG: M_global size is 0'
+            end if
+            if (size(elem_map,1) > 0 .and. size(elem_map,2) > 0) then
+                print '(A,I0,A,I0)', ' DBG: size(elem_map)=', size(elem_map,1), ',', size(elem_map,2)
+            else
+                print '(A)', ' DBG: elem_map size is zero in at least one dimension'
+            end if
+        end if
 
     required_N = nelems*(N-1) + 1
     N_global = required_N
@@ -494,29 +497,35 @@ end subroutine assemble_global_matrices
         if (size(x_ref) < N .or. size(w_ref) < N) then
             ierr = -2
             if (present(info)) info = ierr
-            print '(A)', 'DBG build_global_grid: FAIL size(x_ref) or size(w_ref) < N'
-            print '(A,I0)', ' DBG: size(x_ref)=', size(x_ref)
-            print '(A,I0)', ' DBG: size(w_ref)=', size(w_ref)
-            print '(A,I0)', ' DBG: N=', N
+            if (dbg_enabled) then
+                print '(A)', 'DBG build_global_grid: FAIL size(x_ref) or size(w_ref) < N'
+                print '(A,I0)', ' DBG: size(x_ref)=', size(x_ref)
+                print '(A,I0)', ' DBG: size(w_ref)=', size(w_ref)
+                print '(A,I0)', ' DBG: N=', N
+            end if
             return
         end if
         if (size(x_global) < required_N .or. size(M_global) < required_N) then
             ierr = -3
             if (present(info)) info = ierr
-            print '(A)', 'DBG build_global_grid: FAIL size(x_global) or size(M_global) < required_N'
-            print '(A,I0)', ' DBG: size(x_global)=', size(x_global)
-            print '(A,I0)', ' DBG: size(M_global)=', size(M_global)
-            print '(A,I0)', ' DBG: required_N=', required_N
+            if (dbg_enabled) then
+                print '(A)', 'DBG build_global_grid: FAIL size(x_global) or size(M_global) < required_N'
+                print '(A,I0)', ' DBG: size(x_global)=', size(x_global)
+                print '(A,I0)', ' DBG: size(M_global)=', size(M_global)
+                print '(A,I0)', ' DBG: required_N=', required_N
+            end if
             return
         end if
         if (size(elem_map,1) < nelems .or. size(elem_map,2) < N) then
             ierr = -4
             if (present(info)) info = ierr
-            print '(A)', 'DBG build_global_grid: FAIL size(elem_map) too small'
-            print '(A,I0)', ' DBG: size(elem_map,1)=', size(elem_map,1)
-            print '(A,I0)', ' DBG: size(elem_map,2)=', size(elem_map,2)
-            print '(A,I0)', ' DBG: nelems=', nelems
-            print '(A,I0)', ' DBG: N=', N
+            if (dbg_enabled) then
+                print '(A)', 'DBG build_global_grid: FAIL size(elem_map) too small'
+                print '(A,I0)', ' DBG: size(elem_map,1)=', size(elem_map,1)
+                print '(A,I0)', ' DBG: size(elem_map,2)=', size(elem_map,2)
+                print '(A,I0)', ' DBG: nelems=', nelems
+                print '(A,I0)', ' DBG: N=', N
+            end if
             return
         end if
 
@@ -529,7 +538,7 @@ end subroutine assemble_global_matrices
             return
         end if
 
-    ! Initialize global weights to zero (we will assemble contributions)
+    ! Initialize global weights to zero 
     M_global = 0.0_wp
 
         ! For simplicity use Lobatto reference nodes for all elements.
