@@ -1,0 +1,710 @@
+! ============================================================================
+! COULFG モジュール: Barnett の COUL90 アルゴリズムに基づく
+!                    クーロン関数 F_l, G_l および微分 F'_l, G'_l の計算
+! ============================================================================
+! 参考文献: 
+!   A.R. Barnett, "COULCC: A continued-fraction algorithm for Coulomb functions 
+!   of complex order with complex arguments", Comp. Phys. Comm. 21, 297-314 (1981)
+!
+! 主な手法:
+!   - CF1 (連分数1): F'_l/F_l の比を Lentz-Thompson アルゴリズムで計算
+!   - CF2 (連分数2): p,q を Steed 法で計算し、γ = (f - p)/q から正規化
+!   - JWKB 近似: 古典的転回点近傍での G_l の初期値推定（大 l, x < 転回点）
+!   - 後退反復: F_l を l_max → l_min へ下向き再帰で安定計算
+!   - 前進反復: G_l を l_min → l_max へ上向き再帰（Miller 法的正規化）
+! ============================================================================
+module COULFG
+  use iso_fortran_env, only : dp => real64, error_unit
+  implicit none
+
+  private
+  public :: coul90, coul90_get_diagnostics, coulga
+
+  ! ========================================
+  ! 数値計算パラメータ
+  ! ========================================
+  integer, parameter :: limit_iterations = 20000      ! 連分数の最大反復回数
+  real(dp), parameter :: small_value = 1.0e-150_dp    ! アンダーフロー回避用の微小値
+  real(dp), parameter :: default_accuracy = 1.0e-14_dp! デフォルト相対精度
+  real(dp), parameter :: half = 0.5_dp
+  real(dp), parameter :: one = 1.0_dp
+  real(dp), parameter :: two = 2.0_dp
+  real(dp), parameter :: pi_const = acos(-one)
+  real(dp), parameter :: two_pi = two * pi_const
+  real(dp), parameter :: sqrt_two_pi = sqrt(two_pi)
+  real(dp), parameter :: ten_squared = 1.0e2_dp
+  real(dp), parameter :: rt2_over_pi = 0.797884560802865_dp  ! sqrt(2/π)
+
+  ! ========================================
+  ! 診断情報記録用のモジュール変数
+  ! ========================================
+  ! これらの変数は計算の収束状況や内部状態を記録し、
+  ! coul90_get_diagnostics で取得可能
+  integer, save :: nfp_record = 0         ! CF1 の反復回数
+  integer, save :: npq_record = 0         ! CF2 の反復回数
+  integer, save :: iexp_record = 0        ! JWKB での指数スケーリング
+  integer, save :: minl_record = 0        ! 計算した最小の角運動量 l
+  real(dp), save :: paccq_record = one    ! p, q の相対精度推定
+  real(dp), save :: cf1_record = 0.0_dp   ! CF1 で計算した f = F'/F
+  real(dp), save :: p_record = 0.0_dp     ! CF2 で計算した p 値
+  real(dp), save :: q_record = 0.0_dp     ! CF2 で計算した q 値
+  real(dp), save :: f_record = 0.0_dp     ! 最終的な F'/F 比
+  real(dp), save :: gamma_record = 0.0_dp ! 正規化パラメータ γ = (f - p)/q
+  real(dp), save :: wronsk_record = 0.0_dp! Wronskian 関連の正規化係数
+
+contains
+
+  ! ============================================================================
+  ! subroutine coul90: クーロン関数 F_l, G_l とその微分の計算
+  ! ============================================================================
+  ! 【入力】
+  !   x        : 動径座標 r (原子単位系では a.u.)
+  !   eta_in   : Sommerfeld パラメータ η = Z/k (kfn=0 の場合のみ)
+  !              ※ kfn≠0 では内部で η=0 に設定（球Bessel関数モード）
+  !   xlmin    : 計算開始角運動量 l_min (実数、整数でなくてもよい)
+  !   lrange   : 計算する l の個数 (l_min から l_min+lrange まで)
+  !   kfn      : 関数種別フラグ
+  !              = 0: 正規化されたクーロン関数 F_l, G_l
+  !              = 1: 球Bessel関数 j_l, 球Neumann関数 n_l (η=0)
+  !              = 2: Riccati-Bessel 関数 (√x j_l, √x n_l)
+  !
+  ! 【出力】
+  !   fc(0:maxl)  : F_l(x) または j_l(x) または √x j_l(x)
+  !   gc(0:maxl)  : G_l(x) または n_l(x) または √x n_l(x)
+  !   fcp(0:maxl) : F'_l(x) または微分
+  !   gcp(0:maxl) : G'_l(x) または微分
+  !   ifail       : エラーフラグ
+  !                 =  0: 正常終了
+  !                 = -1: x が小さすぎる (x ≤ √accuracy)
+  !                 = -2: 無効な l の範囲指定
+  !                 = -3: 配列サイズ不足
+  !                 =  1: CF1 が収束しなかった
+  !                 =  2: CF2 が収束しなかった
+  ! ============================================================================
+  subroutine coul90(x, eta_in, xlmin, lrange, fc, gc, fcp, gcp, kfn, ifail)
+    real(dp), intent(in) :: x
+    real(dp), intent(in) :: eta_in
+    real(dp), intent(in) :: xlmin
+    integer, intent(in) :: lrange
+  real(dp), intent(inout), target :: fc(:)
+  real(dp), intent(inout), target :: gc(:)
+  real(dp), intent(inout), target :: fcp(:)
+  real(dp), intent(inout), target :: gcp(:)
+    integer, intent(in) :: kfn
+    integer, intent(out) :: ifail
+
+    ! ========================================
+    ! 内部変数
+    ! ========================================
+    real(dp) :: eta                ! 有効 Sommerfeld パラメータ
+    real(dp) :: accur, acch        ! 精度パラメータ
+    real(dp) :: xlm, xll, xinv     ! 角運動量関連
+    real(dp) :: e2mm1              ! (l_min+1/2)² + η²
+    
+    ! CF1 (連分数1: F'/F の計算) 関連変数
+    real(dp) :: cf1_val, dcf1, den, rk2, tk, pk, pk1
+    real(dp) :: etak, d_val, c_val
+    real(dp) :: f_ratio            ! 最終的な F'/F 比
+    
+    ! 後退反復 (F_l 計算) 関連変数
+    real(dp) :: fcm_inl, gcm_inl   ! l_min での正規化された F, G
+    
+    ! 正規化パラメータ
+    real(dp) :: omega, gamma_val, gamma_inv
+    real(dp) :: alpha, beta        ! kfn による定数項
+    
+    ! 前進・後退反復用
+    real(dp) :: xl, rl, sl, el
+    
+    ! JWKB 近似関連
+    real(dp) :: gjwkb, fjwkb
+    
+    ! CF2 (連分数2: p, q の計算) 関連変数
+    real(dp) :: wi, ar, ai, br, bi, di, dp_val, dq_val
+    real(dp) :: p_val, q_val, a_val, b_val
+    real(dp) :: paccq_local
+    real(dp) :: den_abs
+    real(dp) :: fcmaxl
+    real(dp) :: g_threshold
+    
+    ! ループカウンタと範囲
+  integer :: minl, maxl
+  integer :: lb_fc, lb_gc, lb_fcp, lb_gcp
+  integer :: ub_fc, ub_gc, ub_fcp, ub_gcp
+  real(dp), pointer :: FCZ(:), GCZ(:), FCPZ(:), GCPZ(:)
+    integer :: l
+    integer :: limit_counter
+    
+    ! フラグ
+    logical :: etane0              ! η ≠ 0 かどうか
+    logical :: xlturn              ! 古典的転回点の内側かどうか
+    logical :: cf1_converged       ! CF1 収束フラグ
+    logical :: cf2_converged       ! CF2 収束フラグ
+
+    ! ========================================
+    ! 初期化
+    ! ========================================
+
+    ! ========================================
+    ! 初期化
+    ! ========================================
+    eta = eta_in
+    accur = default_accuracy
+    acch = sqrt(accur)
+    ifail = 0
+    paccq_record = one
+    nfp_record = 0
+    npq_record = 0
+    iexp_record = 1
+    gjwkb = 0.0_dp
+
+    ! kfn≠0 の場合は球Bessel関数モード（η=0 に強制）
+    if (kfn /= 0) eta = 0.0_dp
+    etane0 = abs(eta) > 0.0_dp
+
+    ! ========================================
+    ! 入力値の検証
+    ! ========================================
+    ! x が小さすぎる場合は漸近展開を使うべき
+    if (x <= acch) then
+      ifail = -1
+      write(error_unit, '(a, 1pe12.3, a, 1pe12.3, a)') 'COUL90: x = ', x, &
+        ' <= sqrt(accuracy) = ', acch, '; use small-x solution or adjust input.'
+      return
+    end if
+
+    ! kfn=2 の場合は Riccati-Bessel なので l-1/2 から開始
+    if (kfn == 2) then
+      xlm = xlmin - half
+    else
+      xlm = xlmin
+    end if
+
+    ! 角運動量範囲の妥当性チェック
+    if (xlm <= -one .or. lrange < 0) then
+      ifail = -2
+      write(error_unit, '(a, i6, 2(1x, 1pe12.3))') 'COUL90: invalid order inputs lrange,xlmin,xlm =', &
+        lrange, xlmin, xlm
+      return
+    end if
+
+    ! ========================================
+    ! 古典的転回点の判定
+    ! ========================================
+    ! e2mm1 = (l+1/2)² + η²
+    ! 転回点条件: x(x - 2η) < (l+1/2)²  ⇔  運動エネルギーが負
+    e2mm1 = xlm * xlm + xlm
+    xlturn = x * (x - two * eta) < e2mm1
+    e2mm1 = e2mm1 + eta * eta
+
+    minl = max(int(xlmin + accur), 0)
+    maxl = minl + lrange
+    minl_record = minl
+
+    xll = xlm + real(lrange, dp)
+    xinv = one / x
+
+    ! ========================================
+    ! 配列境界の検証
+    ! ========================================
+    lb_fc = lbound(fc, 1)
+    lb_gc = lbound(gc, 1)
+    lb_fcp = lbound(fcp, 1)
+    lb_gcp = lbound(gcp, 1)
+    ub_fc = ubound(fc, 1)
+    ub_gc = ubound(gc, 1)
+    ub_fcp = ubound(fcp, 1)
+    ub_gcp = ubound(gcp, 1)
+
+    ! 入力配列の下限が 0 でなくても許容し、0 起点のポインタに再マップ
+    if (ub_fc - lb_fc < maxl .or. ub_gc - lb_gc < maxl .or. ub_fcp - lb_fcp < maxl &
+        .or. ub_gcp - lb_gcp < maxl) then
+      ifail = -3
+      write(error_unit, '(a, 4(i6,1x))') 'COUL90: arrays too small for requested range.', &
+        ub_fc, ub_gc, ub_fcp, ub_gcp
+      return
+    end if
+
+    ! 0..maxl のローカルビュー
+  FCZ(0:maxl)  => fc(lb_fc:lb_fc+maxl)
+  GCZ(0:maxl)  => gc(lb_gc:lb_gc+maxl)
+  FCPZ(0:maxl) => fcp(lb_fcp:lb_fcp+maxl)
+  GCPZ(0:maxl) => gcp(lb_gcp:lb_gcp+maxl)
+
+    ! ========================================
+    ! CF1: 連分数による F'/F の計算
+    ! ========================================
+    ! 三項漸化式: F_{l+1} = [(l+1)/x + η/(l+1)] F_l - [(1 + (η/(l+1))²)] F_{l-1}
+    ! Lentz-Thompson アルゴリズムで f = F'_l/F_l を計算
+    ! 初期値: f_0 = η/(l+1) + (l+1)/x
+
+    ! ========================================
+    ! CF1: 連分数による F'/F の計算
+    ! ========================================
+    ! 三項漸化式: F_{l+1} = [(l+1)/x + η/(l+1)] F_l - [(1 + (η/(l+1))²)] F_{l-1}
+    ! Lentz-Thompson アルゴリズムで f = F'_l/F_l を計算
+    ! 初期値: f_0 = η/(l+1) + (l+1)/x
+    pk = xll + one
+    cf1_val = eta / pk + pk * xinv
+    if (abs(cf1_val) < small_value) cf1_val = small_value
+    rk2 = one
+    d_val = 0.0_dp
+    c_val = cf1_val
+    den = one
+
+    cf1_converged = .false.
+    do limit_counter = 1, limit_iterations
+      pk1 = pk + one
+      
+      ! η ≠ 0 のときの係数計算
+      if (etane0) then
+        etak = eta / pk
+        rk2 = one + etak * etak  ! 1 + (η/k)²
+        tk = (pk + pk1) * (xinv + etak / pk1)
+      else
+        ! η = 0 のときは球Bessel関数の漸化式
+        tk = (pk + pk1) * xinv
+      end if
+
+      ! Lentz-Thompson 更新
+      ! d = 1 / [t - r²·d]
+      ! c = t - r²/c
+      ! f ← f · (c·d)
+      d_val = tk - rk2 * d_val
+      c_val = tk - rk2 / c_val
+      if (abs(c_val) < small_value) c_val = small_value
+      if (abs(d_val) < small_value) d_val = small_value
+
+      d_val = one / d_val
+      dcf1 = d_val * c_val
+      cf1_val = cf1_val * dcf1
+      if (d_val < 0.0_dp) den = -den  ! 符号追跡（後の正規化に使用）
+      pk = pk1
+
+      ! 収束判定: |dcf1 - 1| < accur
+      if (abs(dcf1 - one) < accur) then
+        cf1_converged = .true.
+        exit
+      end if
+    end do
+
+    if (.not. cf1_converged) then
+      ifail = 1
+      cf1_record = cf1_val
+      p_record = 0.0_dp
+      q_record = 0.0_dp
+      f_record = 0.0_dp
+      gamma_record = 0.0_dp
+      wronsk_record = 0.0_dp
+      paccq_record = one
+      write(error_unit, '(a, i8, 1x, 3(1pe12.3, 1x))') 'COUL90: CF1 failed to converge within limit.', &
+        limit_iterations, cf1_val, dcf1, pk
+      return
+    end if
+
+    nfp_record = int(pk - xll - one)
+    f_ratio = cf1_val
+
+    ! ========================================
+    ! 後退反復: F_l の計算（l_max → l_min）
+    ! ========================================
+    ! 三項漸化式を l の降順に適用
+    ! F_{l-1} = [s_l·F_l + F'_l] / r_l
+    ! F'_{l-1} = s_l·F_{l-1} - r_l·F_l
+    ! ここで s_l = l/x + η/l, r_l = √(1 + (η/l)²)
+    if (lrange > 0) then
+      ! 任意の初期値で開始（後で正規化されるので値は任意）
+  fcmaxl = small_value * den
+  FCZ(maxl) = fcmaxl
+  FCPZ(maxl) = fcmaxl * cf1_val
+  GCZ(maxl) = 0.0_dp   ! G_l は後で前進反復で計算
+  GCPZ(maxl) = 0.0_dp
+
+      xl = xll
+      rl = one
+      do l = maxl, minl + 1, -1
+        if (etane0) then
+          el = eta / xl
+          rl = sqrt(one + el * el)
+          sl = xl * xinv + el
+          GCZ(l) = rl  ! 後で G_l 計算に使用するため一時保存
+          GCPZ(l) = sl
+        else
+          sl = xl * xinv
+        end if
+  FCZ(l - 1) = (FCZ(l) * sl + FCPZ(l)) / rl
+  FCPZ(l - 1) = FCZ(l - 1) * sl - FCZ(l) * rl
+        xl = xl - one
+      end do
+
+      ! F_{l_min} が 0 に近すぎる場合の保護
+  if (abs(FCZ(minl)) < accur * small_value) FCZ(minl) = accur * small_value
+  f_ratio = FCPZ(minl) / FCZ(minl)
+  den = FCZ(minl)
+    else
+      ! lrange = 0 の場合は単一の l のみ
+  FCZ(maxl) = den
+  FCPZ(maxl) = den * cf1_val
+    end if
+
+    cf1_record = cf1_val
+    f_record = f_ratio
+
+    ! ========================================
+    ! JWKB 近似による初期推定（転回点内側の場合）
+    ! ========================================
+    ! 古典的転回点 r_tp の内側では G_l が指数関数的に成長するため
+    ! JWKB 近似で初期値を推定
+    if (xlturn) call jwkb(x, eta, max(xlm, 0.0_dp), fjwkb, gjwkb, iexp_record)
+
+    ! ========================================
+    ! 正規化パラメータの決定: CF2 または JWKB
+    ! ========================================
+    ! Wronskian: W[F,G] = F·G' - F'·G = 1 より
+    ! γ = (f - p)/q を決定し、ω = 1/(√q·√(1+γ²)) で正規化
+    g_threshold = one / (acch * ten_squared)
+    
+    if (iexp_record > 1 .or. gjwkb > g_threshold) then
+      ! JWKB が有効な場合（大きな G_l の場合）
+      omega = fjwkb
+      gamma_val = gjwkb * omega
+      gamma_inv = one / gamma_val
+      p_val = f_ratio
+      q_val = one
+    else
+      ! CF2 (Steed 法) で p, q を計算
+      ! ========================================
+      ! CF2: 連分数による p, q の計算
+      ! ========================================
+      ! Steed のアルゴリズムで複素連分数を計算
+      ! p - iq = (η - ix) / (η + ix - (l+1)(l+1+2iη)/(2(η+ix) - ...))
+      xlturn = .false.
+      pk = 0.0_dp
+      wi = eta + eta
+      p_val = 0.0_dp
+      q_val = one - eta * xinv
+      
+      ! 初期値: a = -(l²+l+η²), b = 2(x-η), (b には虚部 2i も含む)
+      ar = -e2mm1
+      ai = eta
+      br = two * (x - eta)
+      bi = two
+      d_val = br / (br * br + bi * bi)
+      di = -bi / (br * br + bi * bi)
+      dp_val = -xinv * (ar * di + ai * d_val)
+      dq_val = xinv * (ar * d_val - ai * di)
+
+      cf2_converged = .false.
+      do limit_counter = 1, limit_iterations
+        p_val = p_val + dp_val
+        q_val = q_val + dq_val
+        pk = pk + two
+        ar = ar + pk
+        ai = ai + wi
+        bi = bi + two
+        
+        ! 複素数の除算と更新
+        d_val = ar * d_val - ai * di + br
+        di = ai * d_val + ar * di + bi
+        c_val = one / (d_val * d_val + di * di)
+        d_val = c_val * d_val
+        di = -c_val * di
+        a_val = br * d_val - bi * di - one
+        b_val = bi * d_val + br * di
+        c_val = dp_val * a_val - dq_val * b_val
+        dq_val = dp_val * b_val + dq_val * a_val
+        dp_val = c_val
+
+        ! 収束判定
+        if (abs(dp_val) + abs(dq_val) <= (abs(p_val) + abs(q_val)) * accur) then
+          cf2_converged = .true.
+          exit
+        end if
+      end do
+
+      if (.not. cf2_converged) then
+        ifail = 2
+        write(error_unit, '(a, i8)') 'COUL90: CF2 failed to converge within limit.', limit_iterations
+        return
+      end if
+
+      npq_record = int(pk / two)
+      paccq_local = half * accur / min(abs(q_val), one)
+      if (abs(p_val) > abs(q_val)) paccq_local = paccq_local * abs(p_val)
+      paccq_record = paccq_local
+
+      ! γ = (f - p)/q の計算
+      gamma_val = (f_ratio - p_val) / q_val
+      
+      ! ω = 1 / (√q · √(1+γ²)) の計算
+      if (abs(gamma_val) <= one) then
+        omega = sqrt(one + gamma_val * gamma_val)
+      else
+        gamma_inv = one / gamma_val
+        omega = sqrt(one + gamma_inv * gamma_inv) * abs(gamma_val)
+      end if
+      omega = one / (omega * sqrt(q_val))
+      gamma_inv = one / gamma_val
+      wronsk_record = omega
+    end if
+
+    ! ========================================
+    ! kfn による定数項の設定
+    ! ========================================
+    ! kfn=0: 正規化クーロン関数（α=0, β=1）
+    ! kfn=1: 球Bessel関数（α=1/x, β=1/x）
+    ! kfn=2: Riccati-Bessel（α=1/(2x), β=√(2/(πx))）
+    if (kfn == 1) then
+      alpha = xinv
+      beta = xinv
+    else if (kfn == 2) then
+      alpha = half * xinv
+      beta = sqrt(xinv) * rt2_over_pi
+    else
+      alpha = 0.0_dp
+      beta = one
+    end if
+
+    ! ========================================
+    ! l_min での F, G の正規化
+    ! ========================================
+    fcm_inl = sign(one, den) * omega * beta
+    if (xlturn) then
+      gcm_inl = gjwkb * beta
+    else
+      gcm_inl = fcm_inl * gamma_val
+    end if
+    if (kfn /= 0) gcm_inl = -gcm_inl
+
+  FCZ(minl) = fcm_inl
+  GCZ(minl) = gcm_inl
+  GCPZ(minl) = gcm_inl * (p_val - q_val * gamma_inv - alpha)
+  FCPZ(minl) = fcm_inl * (f_ratio - alpha)
+
+    ! lrange=0 の場合はここで終了
+    if (lrange == 0) then
+      gamma_record = gamma_val
+      p_record = p_val
+      q_record = q_val
+      f_record = f_ratio
+      return
+    end if
+
+    ! ========================================
+    ! 前進反復: G_l の計算（l_min → l_max）
+    ! ========================================
+    ! 三項漸化式を l の昇順に適用（安定）
+    ! G_{l+1} = [(s_l - α)·G_l - G'_l] / r_l
+    ! G'_{l+1} = r_l·G_l - (s_l + α)·G_{l+1}
+    den_abs = abs(den)
+    if (den_abs == 0.0_dp) den_abs = small_value
+    omega = beta * omega / den_abs
+
+    xl = xlm
+    rl = one
+    do l = minl + 1, maxl
+      xl = xl + one
+      if (etane0) then
+  rl = GCZ(l)  ! 後退反復で一時保存した r_l
+  sl = GCPZ(l) ! 後退反復で一時保存した s_l
+      else
+        sl = xl * xinv
+      end if
+  GCZ(l) = ((sl - alpha) * GCZ(l - 1) - GCPZ(l - 1)) / rl
+  GCPZ(l) = rl * GCZ(l - 1) - (sl + alpha) * GCZ(l)
+      
+      ! F_l も正規化
+  FCPZ(l) = omega * (FCPZ(l) - alpha * FCZ(l))
+  FCZ(l) = omega * FCZ(l)
+    end do
+
+    ! 診断情報を記録
+    cf1_record = cf1_val
+    p_record = p_val
+    q_record = q_val
+    f_record = f_ratio
+    gamma_record = gamma_val
+    wronsk_record = omega
+  end subroutine coul90
+
+  ! ============================================================================
+  ! subroutine coul90_get_diagnostics: 診断情報の取得
+  ! ============================================================================
+  ! 直前の coul90 呼び出しで記録された内部情報を取得
+  ! デバッグや収束解析に有用
+  !
+  ! 【出力】
+  !   paccq : CF2 で計算した p, q の相対精度推定
+  !   nfp   : CF1 の反復回数
+  !   npq   : CF2 の反復回数
+  !   iexp  : JWKB 推定での指数スケーリング（10^iexp）
+  !   minl  : 計算開始した最小の l 値
+  !   cf1   : CF1 で計算した F'/F 比
+  !   p     : CF2 で計算した p 値
+  !   q     : CF2 で計算した q 値
+  !   f     : 最終的な F'/F 比（後退反復後）
+  !   gamma : 正規化パラメータ γ = (f - p)/q
+  !   wronsk: Wronskian 関連の正規化係数 ω
+  ! ============================================================================
+  subroutine coul90_get_diagnostics(paccq, nfp, npq, iexp, minl, cf1, p, q, f, gamma, wronsk)
+    real(dp), intent(out) :: paccq
+    integer, intent(out) :: nfp
+    integer, intent(out) :: npq
+    integer, intent(out) :: iexp
+    integer, intent(out) :: minl
+    real(dp), intent(out) :: cf1
+    real(dp), intent(out) :: p
+    real(dp), intent(out) :: q
+    real(dp), intent(out) :: f
+    real(dp), intent(out) :: gamma
+    real(dp), intent(out) :: wronsk
+
+    paccq = paccq_record
+    nfp = nfp_record
+    npq = npq_record
+    iexp = iexp_record
+    minl = minl_record
+    cf1 = cf1_record
+    p = p_record
+    q = q_record
+    f = f_record
+    gamma = gamma_record
+    wronsk = wronsk_record
+  end subroutine coul90_get_diagnostics
+
+  ! ============================================================================
+  ! subroutine jwkb: JWKB 近似による F, G の初期値推定
+  ! ============================================================================
+  ! 古典的転回点の内側で G_l が指数関数的に大きくなる場合の初期推定
+  ! WKB 近似: φ(r) ≈ exp(±∫√[2(E-V_eff)] dr)
+  ! ここで V_eff = l(l+1)/(2r²) - Z/r
+  !
+  ! 【入力】
+  !   x    : 動径座標 r
+  !   eta  : Sommerfeld パラメータ η = Z/k
+  !   xl   : 角運動量 l
+  !
+  ! 【出力】
+  !   fjwkb: JWKB 近似での F_l の推定値
+  !   gjwkb: JWKB 近似での G_l の推定値
+  !   iexp : 指数スケーリング係数（gjwkb = 真の値 × 10^(-iexp)）
+  ! ============================================================================
+  subroutine jwkb(x, eta, xl, fjwkb, gjwkb, iexp)
+    real(dp), intent(in) :: x
+    real(dp), intent(in) :: eta
+    real(dp), intent(in) :: xl
+    real(dp), intent(out) :: fjwkb
+    real(dp), intent(out) :: gjwkb
+    integer, intent(inout) :: iexp
+
+    real(dp), parameter :: maxexp = 300.0_dp
+    real(dp), parameter :: log10e = 0.434294481903252_dp  ! log₁₀(e)
+
+    real(dp) :: gh2, xll1
+    real(dp) :: hll, hl, sl, rl2, gh
+    real(dp) :: phi, phi10
+
+    ! ========================================
+    ! 有効ポテンシャルの計算
+    ! ========================================
+    ! gh2 = 2kr(r - η/k) = 運動量の2乗に比例
+    ! xll1 = l(l+1) = 遠心力バリア
+    gh2 = x * (eta + eta - x)
+    xll1 = max(xl * xl + xl, 0.0_dp)
+    
+    ! 転回点より内側（運動エネルギーが負）の場合
+    if (gh2 + xll1 <= 0.0_dp) then
+      fjwkb = 0.0_dp
+      gjwkb = 0.0_dp
+      return
+    end if
+
+    ! ========================================
+    ! JWKB 位相積分の計算
+    ! ========================================
+    ! Langer 補正を含む改良型 WKB 近似
+    ! hll = l(l+1) + 6/35 (高次補正項)
+    hll = xll1 + 6.0_dp / 35.0_dp
+    hl = sqrt(hll)
+    sl = eta / hl + hl / x
+    rl2 = one + eta * eta / hll
+    gh = sqrt(gh2 + hll) / x
+    
+    ! 位相積分: φ = ∫[r_tp to r] k(r') dr'
+    ! ここで k(r) = √[2(E - V_eff(r))]
+    phi = x * gh - half * (hl * log((gh + sl) * (gh + sl) / rl2) - log(gh))
+    if (eta /= 0.0_dp) phi = phi - eta * atan2(x * gh, x - eta)
+
+    ! ========================================
+    ! 指数関数の計算とスケーリング
+    ! ========================================
+    ! G_l ≈ exp(+φ) は大きくなりすぎるので 10 のべき乗でスケーリング
+    phi10 = -phi * log10e
+    iexp = int(phi10)
+    
+    if (real(iexp, dp) > maxexp) then
+      ! 指数部が大きい場合は分離して計算
+      gjwkb = 10.0_dp**(phi10 - real(iexp, dp))
+    else
+      ! 通常の指数関数で計算可能
+      gjwkb = exp(-phi)
+      iexp = 0
+    end if
+    
+    ! F_l ≈ 1/(2k·G_l) の関係（Wronskian から）
+    fjwkb = half / (gh * gjwkb)
+  end subroutine jwkb
+
+    ! ============================================================================
+    ! subroutine coulga: Coulomb 位相σ_lの計算
+    ! ============================================================================
+    subroutine coulga(xl, eta, dummy, sigma)
+      real(dp), intent(in) :: xl
+      real(dp), intent(in) :: eta
+      real(dp), intent(out) :: dummy
+      real(dp), intent(out) :: sigma
+
+      complex(dp) :: z, lg
+
+      z = cmplx(xl, eta, kind=dp)
+      lg = log_gamma_complex(z)
+      sigma = aimag(lg)
+      dummy = 0.0_dp
+    end subroutine coulga
+
+    recursive pure function log_gamma_complex(z) result(res)
+      complex(dp), intent(in) :: z
+      complex(dp) :: res
+      integer, parameter :: ncoeff = 9
+      real(dp), parameter :: coeff(ncoeff) = (/ &
+           0.99999999999980993_dp, &
+           676.52036812188510_dp, &
+          -1259.1392167224028_dp, &
+           771.32342877765313_dp, &
+          -176.61502916214059_dp, &
+            12.507343278686905_dp, &
+           -0.13857109526572012_dp, &
+            9.9843695780195716e-6_dp, &
+            1.5056327351493116e-7_dp /)
+      real(dp), parameter :: g = 7.0_dp
+
+      complex(dp) :: z1, tmp, series
+      integer :: k
+
+      if (real(z, dp) < 0.5_dp) then
+        ! Reflection formula for stability when Re(z) < 0.5
+        res = log(cmplx(pi_const, 0.0_dp, kind=dp)) - log(sin(pi_const * z)) - log_gamma_complex(one - z)
+        return
+      end if
+
+      z1 = z - one
+      series = coeff(1)
+      do k = 2, ncoeff
+        series = series + coeff(k) / (z1 + real(k - 1, dp))
+      end do
+
+      tmp = z1 + g + half
+      res = (z1 + half) * log(tmp) - tmp + log(series) + log(sqrt_two_pi)
+    end function log_gamma_complex
+
+end module COULFG
