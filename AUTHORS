@@ -1,0 +1,10 @@
+# Authors and acknowledgements
+
+- Main developer: Kawaii_Bokuchin_Puyuyu
+
+Acknowledgements:
+- Development and diagnostic automation assisted by in-repo tooling and
+  diagnostic scripts (`diag_reconstruct.py`).
+
+If you want to record a fuller authorship/acknowledgement history, replace
+the placeholder lines above with names and affiliation information.
