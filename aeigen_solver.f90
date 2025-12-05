@@ -1,7 +1,6 @@
 module aeigen_solver
 
 !------------------------------------------------------------------
-!UNNDER CONSTRUCTION
 !
 ! This module provides routines for solving the adiabatic
 ! eigenvalue problem in quantum scattering calculations
@@ -24,7 +23,18 @@ module aeigen_solver
     private
     public :: solve_adiabatic_hamiltonian
     public :: calculate_coupling_matrix_elements
+    public :: grid_data_t
 
+    type :: grid_data_t
+        real(wp), allocatable :: x_global(:)
+        real(wp), allocatable :: w_global(:)
+        integer, allocatable :: elem_map(:,:)
+        real(wp), allocatable :: D_ref(:,:)
+        real(wp), allocatable :: w_ref(:)
+        integer, allocatable :: active_idx(:)
+        integer :: N_full
+        integer :: nelems
+    end type grid_data_t
 
     contains
 
@@ -68,6 +78,7 @@ module aeigen_solver
         do e = 1, nelems
             ! Calculate Jacobian inverse for this element
             ! J = (x_last - x_first) / 2
+            gi = elem_map(e, 1)
             gj = elem_map(e, N_local)
             J_inv = 2.0_wp / (x_global(gj) - x_global(gi))
 
@@ -159,14 +170,17 @@ module aeigen_solver
         integer, intent(in) :: elem_map(:,:)
         real(wp), intent(in) :: x_global(:), w_global(:)
         real(wp), intent(in) :: D_ref(:,:), w_ref(:)
-        real(wp), intent(in) :: eta, Mj, E_val, F_val
+        real(wp), intent(in) :: eta, Mj, F_val
+        complex(wp), intent(in) :: E_val
         integer, intent(in) :: key_m
-        real(wp), intent(out) :: Mat(N_global, N_global)
+        complex(wp), intent(out) :: Mat(N_global, N_global)
         integer, intent(out), optional :: info
 
         integer :: i, e, gi, ierr
         real(wp) :: xi, m_val, Sz, lambda_val, Z_eff_val
-        real(wp) :: V_diag, term_azi, term_pot, term_soi
+        complex(wp) :: V_diag, term_pot
+        real(wp) :: term_azi, term_soi
+        real(wp), allocatable :: Mat_real(:,:)
         
         ierr = 0
         
@@ -177,10 +191,12 @@ module aeigen_solver
         ! Matrix element < i | d/dxi ( xi d/dxi ) | j > = - < i' | xi | j' > (by integration by parts)
         ! So we multiply by -1.0
         
+        allocate(Mat_real(N_global, N_global))
         call build_xi_differential_matrix(N_global, nelems, elem_map, x_global, w_global, &
-                                          D_ref, w_ref, eta, 3, Mat, ierr)
+                                          D_ref, w_ref, eta, 3, Mat_real, ierr)
         
-        Mat = -1.0_wp * Mat
+        Mat = cmplx(-1.0_wp * Mat_real, 0.0_wp, wp)
+        deallocate(Mat_real)
         
         ! 2. Determine m and Sz based on key_m
         if (key_m == 1) then
@@ -331,10 +347,7 @@ module aeigen_solver
                 gi = elem_map(e,i)
                 xi = x_global(gi)
                 
-                if (xi < 1.0e-12_wp) xi = 1.0e-12_wp
-                
                 call convert_potential_to_xi_eta(xi, eta, lambda_val, Z_eff_val)
-                
                 term_pot = - lambda_val * (xi**2 - eta**2) / (8.0_wp * sqrt(xi*eta)) * m_source
                 
                 Mat(gi, gi) = Mat(gi, gi) + term_pot
@@ -357,12 +370,308 @@ module aeigen_solver
     ! and can be called from outside 
     !--------------------------------------------------------------
 
-    subroutine assemble_global_matrix
+    subroutine assemble_global_matrix(nelems, N_per_elem, x_max, eta, Mj, E_val, F_val, &
+                                      N_global, x_global, w_global, H_global, info, &
+                                      full_grid_data)
+        integer, intent(in) :: nelems, N_per_elem
+        real(wp), intent(in) :: x_max, eta, Mj, F_val
+        complex(wp), intent(in) :: E_val
+        integer, intent(out) :: N_global
+        real(wp), allocatable, intent(out) :: x_global(:), w_global(:)
+        complex(wp), allocatable, intent(out) :: H_global(:,:)
+        integer, intent(out), optional :: info
+        
+        ! Optional container for full grid data needed for coupling calculation
+        type(grid_data_t), intent(out), optional :: full_grid_data
 
+        integer :: ierr, i, j, N_full
+        real(wp), allocatable :: x_ref(:), w_ref(:), b_weights(:), D_ref(:,:)
+        real(wp), allocatable :: M_global_full(:), x_global_full(:)
+        integer, allocatable :: elem_map(:,:)
+        complex(wp), allocatable :: H_diag_up(:,:), H_diag_down(:,:)
+        real(wp), allocatable :: H_coup_up_down(:,:), H_coup_down_up(:,:)
+        logical, allocatable :: active_mask(:)
+        integer, allocatable :: active_idx(:)
+        integer :: n_active
+        real(wp) :: x_min = 0.0_wp
+
+        ierr = 0
+        
+        ! 1. Build Global Grid
+        allocate(x_ref(N_per_elem), w_ref(N_per_elem))
+        allocate(x_global_full(nelems * (N_per_elem - 1) + 1)) 
+        allocate(M_global_full(size(x_global_full)))
+        allocate(elem_map(nelems, N_per_elem))
+        
+        call build_global_grid(nelems, N_per_elem, x_ref, w_ref, &
+                               x_min, x_max, N_full, &
+                               x_global_full, M_global_full, elem_map, ierr)
+        
+        if (ierr /= 0) then
+            if (present(info)) info = ierr
+            return
+        end if
+        
+        ! 2. Compute Differentiation Matrix
+        allocate(b_weights(N_per_elem), D_ref(N_per_elem, N_per_elem))
+        call compute_barycentric_weights(N_per_elem, x_ref, b_weights)
+        call compute_differentiation_matrix(N_per_elem, x_ref, b_weights, D_ref)
+        
+        ! 3. Construct Block Matrices (Full Size)
+        allocate(H_diag_up(N_full, N_full))
+        allocate(H_diag_down(N_full, N_full))
+        allocate(H_coup_up_down(N_full, N_full))
+        allocate(H_coup_down_up(N_full, N_full))
+        
+        ! Up-Up Block (key_m = 1)
+        call construct_diago_block_matrix(N_full, nelems, elem_map, x_global_full, M_global_full, &
+                                          D_ref, w_ref, eta, Mj, E_val, F_val, 1, H_diag_up, ierr)
+        
+        ! Down-Down Block (key_m = 2)
+        call construct_diago_block_matrix(N_full, nelems, elem_map, x_global_full, M_global_full, &
+                                          D_ref, w_ref, eta, Mj, E_val, F_val, 2, H_diag_down, ierr)
+                                          
+        ! Up-Down Coupling (Target Up, Source Down, key_m = 1)
+        call construct_coupling_block_matrix(N_full, nelems, elem_map, x_global_full, M_global_full, &
+                                             D_ref, w_ref, eta, Mj, 1, H_coup_up_down, ierr)
+                                             
+        ! Down-Up Coupling (Target Down, Source Up, key_m = 2)
+        call construct_coupling_block_matrix(N_full, nelems, elem_map, x_global_full, M_global_full, &
+                                             D_ref, w_ref, eta, Mj, 2, H_coup_down_up, ierr)
+
+        ! 4. Apply Boundary Conditions (Remove Origin and Infinity)
+        allocate(active_mask(N_full))
+        active_mask = .true.
+        active_mask(1) = .false.
+        active_mask(N_full) = .false.
+        
+        n_active = count(active_mask)
+        allocate(active_idx(n_active))
+        active_idx = pack([(i, i=1, N_full)], active_mask)
+        
+        ! 5. Assemble Global Matrix (Reduced Size)
+        allocate(H_global(2*n_active, 2*n_active))
+        H_global = (0.0_wp, 0.0_wp)
+        
+        do i = 1, n_active
+            do j = 1, n_active
+                ! Top-Left: Up-Up
+                H_global(i, j) = H_diag_up(active_idx(i), active_idx(j))
+                ! Bottom-Right: Down-Down
+                H_global(n_active + i, n_active + j) = H_diag_down(active_idx(i), active_idx(j))
+                ! Top-Right: Up-Down
+                H_global(i, n_active + j) = cmplx(H_coup_up_down(active_idx(i), active_idx(j)), 0.0_wp, wp)
+                ! Bottom-Left: Down-Up
+                H_global(n_active + i, j) = cmplx(H_coup_down_up(active_idx(i), active_idx(j)), 0.0_wp, wp)
+            end do
+        end do
+        
+        ! Update output N_global and arrays to reflect reduced grid
+        N_global = n_active
+        
+        allocate(w_global(n_active))
+        w_global = M_global_full(active_idx)
+        
+        allocate(x_global(n_active))
+        x_global = x_global_full(active_idx)
+        
+        ! Save full grid data if requested
+        if (present(full_grid_data)) then
+            allocate(full_grid_data%x_global(N_full))
+            full_grid_data%x_global = x_global_full
+            
+            allocate(full_grid_data%w_global(N_full))
+            full_grid_data%w_global = M_global_full
+            
+            allocate(full_grid_data%elem_map(nelems, N_per_elem))
+            full_grid_data%elem_map = elem_map
+            
+            allocate(full_grid_data%D_ref(N_per_elem, N_per_elem))
+            full_grid_data%D_ref = D_ref
+            
+            allocate(full_grid_data%w_ref(N_per_elem))
+            full_grid_data%w_ref = w_ref
+            
+            allocate(full_grid_data%active_idx(n_active))
+            full_grid_data%active_idx = active_idx
+            
+            full_grid_data%N_full = N_full
+            full_grid_data%nelems = nelems
+        end if
+        
+        deallocate(x_ref, w_ref, b_weights, D_ref, M_global_full, x_global_full, elem_map)
+        deallocate(H_diag_up, H_diag_down, H_coup_up_down, H_coup_down_up)
+        deallocate(active_mask, active_idx)
+
+        if (present(info)) info = ierr
     end subroutine assemble_global_matrix
 
-    subroutine solve_adiabatic_hamiltonian
+    subroutine solve_adiabatic_hamiltonian(nelems, N_per_elem, x_max, eta, Mj, E_val, F_val, &
+                                           Evals, Evecs, x_global, w_global, info, &
+                                           calc_coupling, P_mat, Evecs_prev, W_mat, P_nac_mat)
+        integer, intent(in) :: nelems, N_per_elem
+        real(wp), intent(in) :: x_max, eta, Mj, F_val
+        complex(wp), intent(in) :: E_val
+        complex(wp), allocatable, intent(out) :: Evals(:)
+        complex(wp), allocatable, intent(out) :: Evecs(:,:)
+        real(wp), allocatable, intent(out) :: x_global(:), w_global(:)
+        integer, intent(out), optional :: info
+        logical, intent(in), optional :: calc_coupling
+        complex(wp), allocatable, intent(out), optional :: P_mat(:,:)
+        complex(wp), intent(in), optional :: Evecs_prev(:,:)
+        complex(wp), allocatable, intent(out), optional :: W_mat(:,:)
+        complex(wp), allocatable, intent(out), optional :: P_nac_mat(:,:)
 
+        integer :: ierr, N_global, i, j, k
+        complex(wp), allocatable :: H_global(:,:)
+        complex(wp), allocatable :: WORK(:)
+        real(wp), allocatable :: RWORK(:)
+        integer :: LWORK
+        complex(wp), allocatable :: VL(:,:), VR(:,:)
+        type(grid_data_t) :: full_grid
+        logical :: do_coupling
+        complex(wp) :: dot_prod
+        real(wp) :: norm_val
+        complex(wp) :: phase_factor
+        integer, allocatable :: idx_sort(:)
+        real(wp), allocatable :: real_evals(:)
+        complex(wp), allocatable :: temp_vec(:)
+        complex(wp), allocatable :: Evecs_full(:,:)
+
+        ierr = 0
+        do_coupling = .false.
+        if (present(calc_coupling)) do_coupling = calc_coupling
+
+        ! 1. Assemble Hamiltonian
+        ! We request full_grid_data if coupling calculation is needed
+        if (do_coupling) then
+            call assemble_global_matrix(nelems, N_per_elem, x_max, eta, Mj, E_val, F_val, &
+                                        N_global, x_global, w_global, H_global, ierr, &
+                                        full_grid_data=full_grid)
+        else
+            call assemble_global_matrix(nelems, N_per_elem, x_max, eta, Mj, E_val, F_val, &
+                                        N_global, x_global, w_global, H_global, ierr)
+        end if
+
+        if (ierr /= 0) then
+            if (present(info)) info = ierr
+            return
+        end if
+
+        ! 2. Diagonalize using ZGEEV
+        ! ZGEEV computes eigenvalues and right eigenvectors
+        ! H * v = lambda * v
+        
+        allocate(Evals(2*N_global))
+        allocate(VR(2*N_global, 2*N_global))
+        allocate(VL(1,1)) ! Not used
+        
+        ! Query workspace size
+        allocate(WORK(1))
+        allocate(RWORK(4*N_global)) ! Minimum size for ZGEEV is 2*N
+        
+        call ZGEEV('N', 'V', 2*N_global, H_global, 2*N_global, Evals, &
+                   VL, 1, VR, 2*N_global, WORK, -1, RWORK, ierr)
+                   
+        LWORK = int(real(WORK(1)))
+        deallocate(WORK)
+        allocate(WORK(LWORK))
+        
+        call ZGEEV('N', 'V', 2*N_global, H_global, 2*N_global, Evals, &
+                   VL, 1, VR, 2*N_global, WORK, LWORK, RWORK, ierr)
+                   
+        if (ierr /= 0) then
+            if (present(info)) info = ierr
+            return
+        end if
+        
+        ! 3. Sort Eigenvalues (by Real part)
+        ! We sort in DESCENDING order because the kinetic energy operator 
+        ! d/dxi(xi d/dxi) is negative definite.
+        ! The physical states (low kinetic energy) correspond to the largest (least negative) eigenvalues.
+        allocate(idx_sort(2*N_global))
+        allocate(real_evals(2*N_global))
+        real_evals = real(Evals)
+        
+        ! Simple bubble sort index array
+        do i = 1, 2*N_global
+            idx_sort(i) = i
+        end do
+        
+        do i = 1, 2*N_global-1
+            do j = i+1, 2*N_global
+                if (real_evals(idx_sort(j)) > real_evals(idx_sort(i))) then
+                    k = idx_sort(i)
+                    idx_sort(i) = idx_sort(j)
+                    idx_sort(j) = k
+                end if
+            end do
+        end do
+        
+        ! Reorder Evals and Evecs
+        allocate(Evecs(2*N_global, 2*N_global))
+        allocate(temp_vec(2*N_global))
+        
+        do i = 1, 2*N_global
+            k = idx_sort(i)
+            Evecs(:, i) = VR(:, k)
+            temp_vec(i) = Evals(k) ! Store sorted evals temporarily
+        end do
+        Evals = temp_vec
+        deallocate(temp_vec)
+        
+        ! 4. Phase Alignment (if previous eigenvectors provided)
+        if (present(Evecs_prev)) then
+            if (size(Evecs_prev, 1) == 2*N_global .and. size(Evecs_prev, 2) == 2*N_global) then
+                do i = 1, 2*N_global
+                    ! Calculate overlap < v_prev | v_curr >
+                    dot_prod = dot_product(Evecs_prev(:, i), Evecs(:, i))
+                    
+                    ! We want < v_prev | v_curr > to be real and positive
+                    ! Multiply v_curr by phase factor exp(-i * arg(dot_prod))
+                    ! phase_factor = conjg(dot_prod) / |dot_prod|
+                    
+                    norm_val = abs(dot_prod)
+                    if (norm_val > 1.0e-10_wp) then
+                        phase_factor = conjg(dot_prod) / norm_val
+                        Evecs(:, i) = Evecs(:, i) * phase_factor
+                    end if
+                end do
+            end if
+        end if
+        
+        ! 5. Calculate Coupling Matrix Elements (if requested)
+        if (do_coupling) then
+            ! We need to reconstruct full eigenvectors (with zeros at boundaries)
+            ! full_grid contains the mapping info
+            
+            allocate(Evecs_full(2*full_grid%N_full, 2*N_global))
+            Evecs_full = (0.0_wp, 0.0_wp)
+            
+            ! Map reduced eigenvectors to full grid
+            ! active_idx maps reduced index 1..N_global to full index
+            do j = 1, 2*N_global ! Loop over states
+                do i = 1, N_global ! Loop over reduced grid points
+                    ! Up component
+                    Evecs_full(full_grid%active_idx(i), j) = Evecs(i, j)
+                    ! Down component
+                    Evecs_full(full_grid%N_full + full_grid%active_idx(i), j) = Evecs(N_global + i, j)
+                end do
+            end do
+            
+            if (present(P_mat)) allocate(P_mat(2*N_global, 2*N_global))
+            if (present(W_mat)) allocate(W_mat(2*N_global, 2*N_global))
+            if (present(P_nac_mat)) allocate(P_nac_mat(2*N_global, 2*N_global))
+            
+            call calculate_coupling_matrix_elements(full_grid%N_full, full_grid%nelems, &
+                                                    full_grid%elem_map, full_grid%x_global, full_grid%w_global, &
+                                                    full_grid%D_ref, full_grid%w_ref, eta, Mj, &
+                                                    Evals, Evecs_full, P_mat, W_mat, ierr, P_nac_mat)
+                                                    
+            deallocate(Evecs_full)
+        end if
+
+        if (present(info)) info = ierr
     end subroutine solve_adiabatic_hamiltonian
 
     !--------------------------------------------------------------
@@ -385,7 +694,7 @@ module aeigen_solver
     !--------------------------------------------------------------
 
     subroutine calculate_coupling_matrix_elements(N_global, nelems, elem_map, x_global, w_global, &
-                                                  D_ref, w_ref, eta, Mj, Evals, Evecs, P_mat, info)
+                                                  D_ref, w_ref, eta, Mj, Evals, Evecs, P_mat, W_mat, info, P_nac_mat)
         integer, intent(in) :: N_global, nelems
         integer, intent(in) :: elem_map(:,:)
         real(wp), intent(in) :: x_global(:), w_global(:)
@@ -393,43 +702,106 @@ module aeigen_solver
         real(wp), intent(in) :: eta, Mj
         complex(wp), intent(in) :: Evals(:)
         complex(wp), intent(in) :: Evecs(:,:)
-        complex(wp), intent(out) :: P_mat(:,:)
+        complex(wp), intent(out), optional :: P_mat(:,:)
+        complex(wp), intent(out), optional :: W_mat(:,:)
         integer, intent(out), optional :: info
+        complex(wp), intent(out), optional :: P_nac_mat(:,:)
 
-        integer :: i, j, ierr
+        integer :: i, j, k, ierr, n_states
         complex(wp), allocatable :: dB_deta(:,:)
         complex(wp), parameter :: czero = (0.0_wp, 0.0_wp)
         real(wp), parameter :: tol = 1.0e-10_wp
+        real(wp), allocatable :: W_dvr(:)
+        complex(wp), allocatable :: Temp_mat(:,:)
+        complex(wp), allocatable :: P_std(:,:)
+        complex(wp), allocatable :: W_internal(:,:)
+        real(wp) :: xi, lambda_val, Z_eff_val
 
         ierr = 0
-        allocate(dB_deta(2*N_global, 2*N_global))
+        n_states = size(Evals)
         
-        ! Build dB/deta matrix
-        call build_dB_deta_matrix(N_global, nelems, elem_map, x_global, w_global, &
-                                  D_ref, w_ref, eta, Mj, dB_deta, ierr)
-        
-        ! Calculate P_ij = <i|dB/deta|j> / (Ej - Ei)
-        ! P_mat = <i | dB/deta | j>
-        ! Note: Evecs are stored in columns.
-        P_mat = matmul(conjg(transpose(Evecs)), matmul(dB_deta, Evecs))
-        
-        ! Divide by energy difference
-        do i = 1, size(Evals)
-            do j = 1, size(Evals)
-                if (i == j) then
-                    P_mat(i,j) = czero ! Diagonal term is 0 (or purely imaginary Berry phase, assumed 0 for now)
-                else
-                    if (abs(Evals(j) - Evals(i)) > tol) then
-                        P_mat(i,j) = P_mat(i,j) / (Evals(j) - Evals(i))
+        ! 1. Calculate P_std (Standard Non-adiabatic coupling)
+        ! We calculate this if P_mat OR P_nac_mat is requested
+        if (present(P_mat) .or. present(P_nac_mat)) then
+            allocate(dB_deta(2*N_global, 2*N_global))
+            allocate(P_std(n_states, n_states))
+            
+            ! Build dB/deta matrix
+            call build_dB_deta_matrix(N_global, nelems, elem_map, x_global, w_global, &
+                                      D_ref, w_ref, eta, Mj, dB_deta, ierr)
+            
+            ! Calculate P_ij = <i|dB/deta|j> / (Ej - Ei)
+            P_std = matmul(conjg(transpose(Evecs)), matmul(dB_deta, Evecs))
+            
+            ! Divide by energy difference
+            do i = 1, n_states
+                do j = 1, n_states
+                    if (i == j) then
+                        P_std(i,j) = czero ! Diagonal term is 0
                     else
-                        ! Degenerate case: needs special handling or set to 0
-                        P_mat(i,j) = czero 
+                        if (abs(Evals(j) - Evals(i)) > tol) then
+                            P_std(i,j) = P_std(i,j) / (Evals(j) - Evals(i))
+                        else
+                            P_std(i,j) = czero 
+                        end if
                     end if
+                end do
+            end do
+            deallocate(dB_deta)
+            
+            ! If P_nac_mat is requested, copy P_std
+            if (present(P_nac_mat)) then
+                P_nac_mat = P_std
+            end if
+        end if
+        
+        ! 2. Calculate W_mat (Operator matrix for lambda * sqrt(eta*xi))
+        ! We calculate this if W_mat OR P_mat is requested (needed for weighting P)
+        if (present(W_mat) .or. present(P_mat)) then
+            allocate(W_dvr(2*N_global))
+            allocate(Temp_mat(2*N_global, n_states))
+            allocate(W_internal(n_states, n_states))
+            
+            ! Construct diagonal operator in DVR basis
+            do i = 1, N_global
+                xi = x_global(i)
+                if (xi < 1.0e-12_wp) then
+                    W_dvr(i) = 0.0_wp
+                    W_dvr(N_global + i) = 0.0_wp
+                else
+                    call convert_potential_to_xi_eta(xi, eta, lambda_val, Z_eff_val)
+                    ! Operator is lambda * sqrt(eta * xi)
+                    W_dvr(i) = lambda_val * sqrt(eta * xi)
+                    W_dvr(N_global + i) = W_dvr(i)
                 end if
             end do
-        end do
+            
+            ! Transform to adiabatic basis: W_ad = U^H * W_dvr * U
+            do j = 1, n_states
+                do k = 1, 2*N_global
+                    Temp_mat(k, j) = W_dvr(k) * Evecs(k, j)
+                end do
+            end do
+            
+            W_internal = matmul(conjg(transpose(Evecs)), Temp_mat)
+            
+            if (present(W_mat)) then
+                W_mat = W_internal
+            end if
+            
+            deallocate(W_dvr, Temp_mat)
+        end if
+        
+        ! 3. Calculate Weighted P_mat = W * P_std
+        if (present(P_mat)) then
+            if (allocated(P_std) .and. allocated(W_internal)) then
+                P_mat = matmul(W_internal, P_std)
+            end if
+        end if
+        
+        if (allocated(P_std)) deallocate(P_std)
+        if (allocated(W_internal)) deallocate(W_internal)
 
-        deallocate(dB_deta)
         if (present(info)) info = ierr
     end subroutine calculate_coupling_matrix_elements
 
@@ -470,6 +842,26 @@ module aeigen_solver
                 gi = elem_map(e,i)
                 xi = x_global(gi)
                 
+                if (xi < 1.0e-12_wp) then
+                    ! Singularity at origin:
+                    ! The wavefunction is zero here (Dirichlet BC).
+                    ! However, terms like 1/xi or 1/sqrt(xi) diverge.
+                    ! Since this node is removed from the active basis, 
+                    ! its contribution to the final matrix element <i|O|j> should be zero
+                    ! if we strictly follow the projection.
+                    ! But here we are filling the full matrix.
+                    ! To avoid NaNs propagating via 0 * Inf, we explicitly set terms to 0.
+                    
+                    Mat(gi, gi) = czero
+                    Mat(N_global+gi, N_global+gi) = czero
+                    ! Off-diagonal blocks also 0
+                    Mat(gi, N_global+gi) = czero
+                    Mat(N_global+gi, gi) = czero
+                    
+                    ! For d/dxi part, we also skip
+                    cycle
+                end if
+
                 call convert_potential_to_xi_eta(xi, eta, lambda_val, Z_eff_val, dVc_deta, dlambda_deta)
                 
                 ! 1. Diagonal Blocks (Up-Up and Down-Down)
