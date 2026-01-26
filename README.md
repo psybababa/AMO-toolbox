@@ -2,17 +2,6 @@ AMO-toolbox
 
 原子・分子・光学物理学（AMO）の学習者向けに、数値計算のアルゴリズムとサンプルコードを集めたツールボックスです。
 
-オープンソースプロジェクトです。貢献大歓迎！✊🥺💦
-
-主な特徴
-
-多様なアルゴリズム: FEDVR（Finite Element Discrete Variable Representation）、DVR-IEM（Discrete Variable Representation with Integral Equation Method）、Golub-Welschアルゴリズムなど
-
-AMO物理特化: 散乱計算、遷移双極子、クーロン関数、スピン軌道相互作用などのサンプル
-
-教育・研究向け: 各コードに詳細なコメントを付け、理論背景と参考文献の記載
-
-拡張性: 標準的なFortranで書かれ、gfortranなどのコンパイラで容易にビルド可能。
 
 依存関係
 
@@ -39,5 +28,5 @@ Golub-Welshアルゴリズム (golub_welsch.f90)
  
 
 主な更新履歴
-2025/11/13　サンプルコード追加 重い原子のスピン軌道相互作用による散乱を扱います✊🥺
+2025/11/13　サンプルコード追加 重い原子のスピン軌道相互作用とクーロンポテンシャルによる散乱を扱います
 
