@@ -15,7 +15,8 @@ module aeigen_solver
 ! 4. assemble_global_hamiltonian
 ! 5. solve_adiabatic_hamiltonian
 ! 6. calculate_coupling_matrix_elements
-!----------------written by K.B. Puyuyu(2025/12/04 )----------------
+!----------------written by Reiki(2025/12/04 )----------------
+!----------------Assisted by GitHub Copilot-------------------------
 
     use, intrinsic :: iso_fortran_env, only: wp => real64
     use finite_element_dvr
@@ -23,6 +24,7 @@ module aeigen_solver
     private
     public :: solve_adiabatic_hamiltonian
     public :: calculate_coupling_matrix_elements
+    public :: get_matrices_at_eta
     public :: grid_data_t
 
     type :: grid_data_t
@@ -39,23 +41,22 @@ module aeigen_solver
     contains
 
     !--------------------------------------------------------------
-    !
     ! build_xi_differential_matrix
     !
-    ! constructs the differential matrix in the xi coordinate
+    ! Constructs the differential matrix in the xi coordinate
     ! for operator: f(xi) * d/dxi
     !
-    ! key_f toggles the function f(xi)
-    ! key_f = 0 : f = 1
-    ! key_f = 1 : f = xi
-    ! key_f = 2 : f = lambda * sqrt(xi*eta) * (xi + eta)/2  (Radial part of SOI term)
-    ! key_f = 3 : Stiffness matrix form for operator d/dxi ( xi * d/dxi )
-    !             Computes integral < d(psi_i)/dxi | xi | d(psi_j)/dxi >
-    !             Note: This is symmetric and used for Kinetic Energy part.
+    ! Inputs:
+    !   key_f: Toggles the function f(xi)
+    !     0 : f = 1
+    !     1 : f = xi
+    !     2 : f = lambda * sqrt(xi*eta) * (xi + eta)/2  (Radial part of SOI term)
+    !     3 : Stiffness matrix form for operator d/dxi ( xi * d/dxi )
+    !         Computes integral < d(psi_i)/dxi | xi | d(psi_j)/dxi >
+    !         Note: This is symmetric and used for Kinetic Energy part.
     !
     ! Returns N_global x N_global matrix (Scalar)
     !--------------------------------------------------------------
-
     subroutine build_xi_differential_matrix(N_global, nelems, elem_map, x_global, w_global, &
                                             D_ref, w_ref, eta, key_f, Mat, info)
         integer, intent(in) :: N_global, nelems
@@ -143,27 +144,18 @@ module aeigen_solver
     end subroutine build_xi_differential_matrix
 
     !--------------------------------------------------------------
-    !
-    !
     ! construct_diago_block_matrix
     !
-    ! this adiabiatic hamiltonian consisting diagonal blocks
-    ! which include kinetic energy and potential energy terms
-    ! though we are now considering pauli spinors thus
-    ! global matrix will be 2 times larger
-    ! and there also exsits coupling blocks which comes from spin-orbit interaction
-    ! 
-    ! this subroutine constructs only diagonal blocks
-    ! before assembling global matrix
-    ! 
-    ! due to the use of spinors
-    ! the d/dphi and Sz termes gives different angular momentum contributions
-    ! depending on whether Mj = m + 1/2 or Mj = m - 1/2
-    ! key_m toggles between these two cases
-    ! key_m = 1 : Mj = m +1/2 (Spin Up)
-    ! key_m = 2 : Mj = m -1/2 (Spin Down)
+    ! Constructs the diagonal blocks of the adiabatic Hamiltonian.
+    ! These blocks include kinetic energy and potential energy terms.
+    ! Since we use Pauli spinors, the global matrix is 2N x 2N.
+    ! This subroutine constructs the N x N diagonal blocks (Up-Up or Down-Down).
+    !
+    ! Inputs:
+    !   key_m: Toggles between Mj = m + 1/2 or Mj = m - 1/2
+    !     1 : Mj = m + 1/2 (Spin Up)
+    !     2 : Mj = m - 1/2 (Spin Down)
     !--------------------------------------------------------------
-
     subroutine construct_diago_block_matrix(N_global, nelems, elem_map, x_global, w_global, &
                                             D_ref, w_ref, eta, Mj, E_val, F_val, key_m, Mat, info)
         integer, intent(in) :: N_global, nelems
@@ -251,23 +243,16 @@ module aeigen_solver
     end subroutine construct_diago_block_matrix
 
     !--------------------------------------------------------------
-    !
     ! construct_coupling_block_matrix
     !
-    ! constructs coupling blocks due to spin-orbit interaction
-    ! before assembling global matrix
-    ! from (1,N+1) to (1,2N) and (N,N+1) to (N,2N) elements of matrix
-    ! there is the coupling term comes from down spinor to up spinor
-    ! and vice versa
+    ! Constructs coupling blocks due to spin-orbit interaction.
+    ! These blocks represent the coupling between Up and Down spinors.
     !
-    ! thus this subroutine constructs only coupling blocks
-    ! before assembling global matrix
-    ! 
-    ! key_m toggles between Mj = m +1/2 or Mj = m -1/2
-    ! key_m = 1 : Mj = m +1/2 (Target is Up, Source is Down) -> Construct Up-Down block
-    ! key_m = 2 : Mj = m -1/2 (Target is Down, Source is Up) -> Construct Down-Up block
+    ! Inputs:
+    !   key_m: Toggles between Up-Down or Down-Up coupling
+    !     1 : Mj = m + 1/2 (Target is Up, Source is Down) -> Construct Up-Down block
+    !     2 : Mj = m - 1/2 (Target is Down, Source is Up) -> Construct Down-Up block
     !--------------------------------------------------------------
-
     subroutine construct_coupling_block_matrix(N_global, nelems, elem_map, x_global, w_global, &
                                                D_ref, w_ref, eta, Mj, key_m, Mat, info)
         integer, intent(in) :: N_global, nelems
@@ -358,18 +343,11 @@ module aeigen_solver
     end subroutine construct_coupling_block_matrix
 
     !--------------------------------------------------------------
+    ! assemble_global_matrix
     !
-    ! assemble_global_hamiltonian
-    ! solve_adiabatic_hamiltonian
-    !
-    ! assembles global matrix from diagonal blocks and coupling blocks
-    !
-    ! then solves the adiabatic hamiltonian eigenvalue problem
-    !
-    ! solve_adiabatic_hamiltonian subroutine returns eigenvalues and eigenvectors
-    ! and can be called from outside 
+    ! Assembles the global Hamiltonian matrix from diagonal and coupling blocks.
+    ! Also handles boundary conditions and grid construction.
     !--------------------------------------------------------------
-
     subroutine assemble_global_matrix(nelems, N_per_elem, x_max, eta, Mj, E_val, F_val, &
                                       N_global, x_global, w_global, H_global, info, &
                                       full_grid_data)
@@ -506,9 +484,17 @@ module aeigen_solver
         if (present(info)) info = ierr
     end subroutine assemble_global_matrix
 
+    !--------------------------------------------------------------
+    ! solve_adiabatic_hamiltonian
+    !
+    ! Solves the adiabatic Hamiltonian eigenvalue problem.
+    ! Returns eigenvalues and eigenvectors.
+    ! Can optionally calculate non-adiabatic coupling matrices.
+    !--------------------------------------------------------------
     subroutine solve_adiabatic_hamiltonian(nelems, N_per_elem, x_max, eta, Mj, E_val, F_val, &
                                            Evals, Evecs, x_global, w_global, info, &
-                                           calc_coupling, P_mat, Evecs_prev, W_mat, P_nac_mat)
+                                           calc_coupling, P_mat, Evecs_prev, W_mat, P_nac_mat, &
+                                           W_up_down, W_down_up, P_up_down, P_down_up)
         integer, intent(in) :: nelems, N_per_elem
         real(wp), intent(in) :: x_max, eta, Mj, F_val
         complex(wp), intent(in) :: E_val
@@ -521,6 +507,10 @@ module aeigen_solver
         complex(wp), intent(in), optional :: Evecs_prev(:,:)
         complex(wp), allocatable, intent(out), optional :: W_mat(:,:)
         complex(wp), allocatable, intent(out), optional :: P_nac_mat(:,:)
+        complex(wp), allocatable, intent(out), optional :: W_up_down(:,:)
+        complex(wp), allocatable, intent(out), optional :: W_down_up(:,:)
+        complex(wp), allocatable, intent(out), optional :: P_up_down(:,:)
+        complex(wp), allocatable, intent(out), optional :: P_down_up(:,:)
 
         integer :: ierr, N_global, i, j, k
         complex(wp), allocatable :: H_global(:,:)
@@ -662,11 +652,16 @@ module aeigen_solver
             if (present(P_mat)) allocate(P_mat(2*N_global, 2*N_global))
             if (present(W_mat)) allocate(W_mat(2*N_global, 2*N_global))
             if (present(P_nac_mat)) allocate(P_nac_mat(2*N_global, 2*N_global))
+            if (present(W_up_down)) allocate(W_up_down(2*N_global, 2*N_global))
+            if (present(W_down_up)) allocate(W_down_up(2*N_global, 2*N_global))
+            if (present(P_up_down)) allocate(P_up_down(2*N_global, 2*N_global))
+            if (present(P_down_up)) allocate(P_down_up(2*N_global, 2*N_global))
             
             call calculate_coupling_matrix_elements(full_grid%N_full, full_grid%nelems, &
                                                     full_grid%elem_map, full_grid%x_global, full_grid%w_global, &
                                                     full_grid%D_ref, full_grid%w_ref, eta, Mj, &
-                                                    Evals, Evecs_full, P_mat, W_mat, ierr, P_nac_mat)
+                                                    Evals, Evecs_full, P_mat, W_mat, ierr, P_nac_mat, &
+                                                    W_up_down, W_down_up, P_up_down, P_down_up)
                                                     
             deallocate(Evecs_full)
         end if
@@ -675,26 +670,17 @@ module aeigen_solver
     end subroutine solve_adiabatic_hamiltonian
 
     !--------------------------------------------------------------
-    !
     ! calculate_coupling_matrix_elements
     !
-    ! Using hellman-feynman theorem
+    ! Calculates non-adiabatic coupling matrix elements between adiabatic states
+    ! using the Hellmann-Feynman theorem:
     ! <phi_i | d/d\eta | phi_j> = 1/(E_j - E_i) * <phi_i | dB/d\eta | phi_j>
     !
-    ! calculates non-adiabatic coupling matrix elements
-    ! between adiabatic states
-    ! must be called after solve_adiabatic_hamiltonian
-    ! and calculates derivative couplings
-    ! from adiabatic eigenvectors
-    !
-    ! to gain consistent phase of adiabatic eigenvectors
-    ! it checks the inner product between each eigenvectors is positive
-    !
-    ! this subroutine can be also called from outside
+    ! Must be called after solve_adiabatic_hamiltonian.
     !--------------------------------------------------------------
-
     subroutine calculate_coupling_matrix_elements(N_global, nelems, elem_map, x_global, w_global, &
-                                                  D_ref, w_ref, eta, Mj, Evals, Evecs, P_mat, W_mat, info, P_nac_mat)
+                                                  D_ref, w_ref, eta, Mj, Evals, Evecs, P_mat, W_mat, info, P_nac_mat, &
+                                                  W_up_down, W_down_up, P_up_down, P_down_up)
         integer, intent(in) :: N_global, nelems
         integer, intent(in) :: elem_map(:,:)
         real(wp), intent(in) :: x_global(:), w_global(:)
@@ -706,6 +692,10 @@ module aeigen_solver
         complex(wp), intent(out), optional :: W_mat(:,:)
         integer, intent(out), optional :: info
         complex(wp), intent(out), optional :: P_nac_mat(:,:)
+        complex(wp), intent(out), optional :: W_up_down(:,:)
+        complex(wp), intent(out), optional :: W_down_up(:,:)
+        complex(wp), intent(out), optional :: P_up_down(:,:)
+        complex(wp), intent(out), optional :: P_down_up(:,:)
 
         integer :: i, j, k, ierr, n_states
         complex(wp), allocatable :: dB_deta(:,:)
@@ -716,6 +706,7 @@ module aeigen_solver
         complex(wp), allocatable :: P_std(:,:)
         complex(wp), allocatable :: W_internal(:,:)
         real(wp) :: xi, lambda_val, Z_eff_val
+        complex(wp), allocatable :: Temp_mat_up(:,:), Temp_mat_down(:,:)
 
         ierr = 0
         n_states = size(Evals)
@@ -755,47 +746,92 @@ module aeigen_solver
             end if
         end if
         
-        ! 2. Calculate W_mat (Operator matrix for lambda * sqrt(eta*xi))
-        ! We calculate this if W_mat OR P_mat is requested (needed for weighting P)
-        if (present(W_mat) .or. present(P_mat)) then
-            allocate(W_dvr(2*N_global))
-            allocate(Temp_mat(2*N_global, n_states))
-            allocate(W_internal(n_states, n_states))
+        ! 2. Calculate W_mat and Spin-Flip W matrices
+        if (present(W_mat) .or. present(P_mat) .or. present(W_up_down) .or. present(W_down_up)) then
+            allocate(W_dvr(N_global)) ! Only need size N_global as it's same for Up/Down
             
             ! Construct diagonal operator in DVR basis
             do i = 1, N_global
                 xi = x_global(i)
                 if (xi < 1.0e-12_wp) then
                     W_dvr(i) = 0.0_wp
-                    W_dvr(N_global + i) = 0.0_wp
                 else
                     call convert_potential_to_xi_eta(xi, eta, lambda_val, Z_eff_val)
-                    ! Operator is lambda * sqrt(eta * xi)
                     W_dvr(i) = lambda_val * sqrt(eta * xi)
-                    W_dvr(N_global + i) = W_dvr(i)
                 end if
             end do
             
-            ! Transform to adiabatic basis: W_ad = U^H * W_dvr * U
-            do j = 1, n_states
-                do k = 1, 2*N_global
-                    Temp_mat(k, j) = W_dvr(k) * Evecs(k, j)
+            ! Calculate W_internal (Full W) if needed
+            if (present(W_mat) .or. present(P_mat)) then
+                allocate(Temp_mat(2*N_global, n_states))
+                allocate(W_internal(n_states, n_states))
+                
+                ! W_dvr acts on both Up and Down components identically
+                do j = 1, n_states
+                    do k = 1, N_global
+                        Temp_mat(k, j) = W_dvr(k) * Evecs(k, j) ! Up
+                        Temp_mat(N_global + k, j) = W_dvr(k) * Evecs(N_global + k, j) ! Down
+                    end do
                 end do
-            end do
-            
-            W_internal = matmul(conjg(transpose(Evecs)), Temp_mat)
-            
-            if (present(W_mat)) then
-                W_mat = W_internal
+                
+                W_internal = matmul(conjg(transpose(Evecs)), Temp_mat)
+                
+                if (present(W_mat)) W_mat = W_internal
+                deallocate(Temp_mat)
+            end if
+
+            ! Calculate W_up_down: < Up | W | Down >
+            if (present(W_up_down)) then
+                allocate(Temp_mat_down(N_global, n_states))
+                ! Apply W to Down component of Evecs
+                do j = 1, n_states
+                    do k = 1, N_global
+                        Temp_mat_down(k, j) = W_dvr(k) * Evecs(N_global + k, j)
+                    end do
+                end do
+                ! Project onto Up component of Evecs
+                ! < Up_i | W | Down_j > = sum_k (Evecs(k,i)*) * (W(k) * Evecs(N+k,j))
+                W_up_down = matmul(conjg(transpose(Evecs(1:N_global, :))), Temp_mat_down)
+                deallocate(Temp_mat_down)
+            end if
+
+            ! Calculate W_down_up: < Down | W | Up >
+            if (present(W_down_up)) then
+                allocate(Temp_mat_up(N_global, n_states))
+                ! Apply W to Up component of Evecs
+                do j = 1, n_states
+                    do k = 1, N_global
+                        Temp_mat_up(k, j) = W_dvr(k) * Evecs(k, j)
+                    end do
+                end do
+                ! Project onto Down component of Evecs
+                ! < Down_i | W | Up_j > = sum_k (Evecs(N+k,i)*) * (W(k) * Evecs(k,j))
+                W_down_up = matmul(conjg(transpose(Evecs(N_global+1:2*N_global, :))), Temp_mat_up)
+                deallocate(Temp_mat_up)
             end if
             
-            deallocate(W_dvr, Temp_mat)
+            deallocate(W_dvr)
         end if
         
         ! 3. Calculate Weighted P_mat = W * P_std
         if (present(P_mat)) then
             if (allocated(P_std) .and. allocated(W_internal)) then
                 P_mat = matmul(W_internal, P_std)
+            end if
+        end if
+
+        ! 4. Calculate P_up_down and P_down_up
+        ! P_up_down = W_up_down * P_std
+        if (present(P_up_down)) then
+            if (allocated(P_std) .and. present(W_up_down)) then
+                P_up_down = matmul(W_up_down, P_std)
+            end if
+        end if
+
+        ! P_down_up = W_down_up * P_std
+        if (present(P_down_up)) then
+            if (allocated(P_std) .and. present(W_down_up)) then
+                P_down_up = matmul(W_down_up, P_std)
             end if
         end if
         
@@ -931,31 +967,15 @@ module aeigen_solver
     end subroutine build_dB_deta_matrix
 
     !--------------------------------------------------------------
-    !
     ! convert_potential_to_xi_eta
     !
-    ! this is kinda helper subroutine
-    ! to convert potential expressed in r to that in xi and eta coordinates
-    ! because finite_element_dvr module providers potential in r coordinate
-    ! it is used in both construct_diago_block_matrix and construct_coupling_block_matrix
+    ! Helper subroutine to convert potential expressed in r to xi and eta coordinates.
+    ! The potential includes Z_eff and lambda (SOI parameter).
     !
-    ! lambda = alpha^2/2r  * ( -Z_eff/r^2 -(Z_nuclei -1) *(eta * exp(kia *r)) *WS^2(r))
-    ! WS = 1 / (1+ (eta /kia) * (exp(kia*r)-1) )
-    ! Z_eff = 1 + (Z_nuclei -1) * WS(r)
-    !
-    ! in parabolic cordinates
     ! r = (xi + eta)/2
-    ! thus potential must be converted accordingly
     !
-    ! lambda = alpha^2/(xi + eta) * [ -4*Z_eff/(xi + eta)^2 - 2*(Z_nuclei -1) * eta * exp(kia *(xi + eta)/2) * WS^2( (xi + eta)/2 ) 
-    ! WS = 1/(1 + (eta /kia) * (exp(kia *(xi + eta)/2) -1) )]
-    !
-    ! parameters for Xe 5p electron state is below
-    ! Z_nuclei = 54
-    ! eta = 5.197
-    ! kia = 1.048
+    ! Parameters for Xe 5p electron state are hardcoded.
     !--------------------------------------------------------------
-
     subroutine convert_potential_to_xi_eta(xi, eta, lambda, Z_eff_val, dVc_deta, dlambda_deta)
         real(wp), intent(in) :: xi, eta
         real(wp), intent(out) :: lambda, Z_eff_val
@@ -1029,5 +1049,153 @@ module aeigen_solver
         
     end subroutine convert_potential_to_xi_eta
 
+    !--------------------------------------------------------------
+    ! get_matrices_at_eta
+    !
+    ! API to calculate P (Non-Adiabatic Coupling) and W (Potential + SOI) matrices
+    ! at a specific eta value.
+    !
+    ! Inputs:
+    !   nelems: Number of elements
+    !   N_per_elem: Order of polynomial per element
+    !   x_max: Maximum coordinate
+    !   eta: The adiabatic parameter (distance)
+    !   Mj: Total angular momentum projection
+    !   F_val: Field strength
+    !   n_states: Number of states to return
+    !
+    ! Outputs:
+    !   P_mat: Weighted Coupling Matrix (n_states x n_states)
+    !   W_mat: Potential + SOI Matrix (n_states x n_states)
+    !   P_nac_mat: Standard Non-Adiabatic Coupling Matrix (n_states x n_states)
+    !   evals: Eigenvalues at this eta (n_states)
+    !   info: Error code
+    !--------------------------------------------------------------
+    subroutine get_matrices_at_eta(nelems, N_per_elem, x_max, eta, Mj, F_val, n_states, &
+                                   P_mat, W_mat, P_nac_mat, evals, info, &
+                                   W_up_down, W_down_up, P_up_down, P_down_up)
+        integer, intent(in) :: nelems, N_per_elem
+        real(wp), intent(in) :: x_max, eta, Mj, F_val
+        integer, intent(in) :: n_states
+        complex(wp), intent(out) :: P_mat(n_states, n_states)
+        complex(wp), intent(out) :: W_mat(n_states, n_states)
+        complex(wp), intent(out) :: P_nac_mat(n_states, n_states)
+        complex(wp), intent(out) :: evals(n_states)
+        integer, intent(out), optional :: info
+        complex(wp), intent(out), optional :: W_up_down(n_states, n_states)
+        complex(wp), intent(out), optional :: W_down_up(n_states, n_states)
+        complex(wp), intent(out), optional :: P_up_down(n_states, n_states)
+        complex(wp), intent(out), optional :: P_down_up(n_states, n_states)
+
+        integer :: ierr, i, j
+        complex(wp), allocatable :: evals_full(:), evecs_full(:,:)
+        real(wp), allocatable :: x_global(:), w_global(:)
+        complex(wp), allocatable :: P_full(:,:), W_full(:,:), P_nac_full(:,:)
+        complex(wp), allocatable :: W_ud_full(:,:), W_du_full(:,:)
+        complex(wp), allocatable :: P_ud_full(:,:), P_du_full(:,:)
+        complex(wp) :: E_val_dummy
+        
+        ierr = 0
+        E_val_dummy = (0.0_wp, 0.0_wp) ! Not used for diagonalization, only for Green's function if needed
+
+        ! Call solve_adiabatic_hamiltonian with calc_coupling=.true.
+        ! It will allocate and return full matrices
+        call solve_adiabatic_hamiltonian(nelems, N_per_elem, x_max, eta, Mj, E_val_dummy, F_val, &
+                                         evals_full, evecs_full, x_global, w_global, ierr, &
+                                         calc_coupling=.true., P_mat=P_full, W_mat=W_full, P_nac_mat=P_nac_full, &
+                                         W_up_down=W_ud_full, W_down_up=W_du_full, &
+                                         P_up_down=P_ud_full, P_down_up=P_du_full)
+        
+        if (ierr /= 0) then
+            if (present(info)) info = ierr
+            return
+        end if
+
+        ! Store eigenvalues (Top n_states)
+        if (allocated(evals_full)) then
+            do i = 1, min(n_states, size(evals_full))
+                evals(i) = evals_full(i)
+            end do
+        end if
+
+        ! Store Matrices (Top n_states x n_states block)
+        ! P_full is the Weighted Coupling Matrix
+        if (allocated(P_full)) then
+            do i = 1, min(n_states, size(P_full, 1))
+                do j = 1, min(n_states, size(P_full, 2))
+                    P_mat(i, j) = P_full(i, j)
+                end do
+            end do
+        end if
+        
+        ! W_full is the SOI Matrix <i|H_soi|j>
+        if (allocated(W_full)) then
+            do i = 1, min(n_states, size(W_full, 1))
+                do j = 1, min(n_states, size(W_full, 2))
+                    W_mat(i, j) = W_full(i, j)
+                end do
+            end do
+        end if
+
+        ! P_nac_full is the Standard NAC Matrix <i|d/deta|j>
+        if (allocated(P_nac_full)) then
+            do i = 1, min(n_states, size(P_nac_full, 1))
+                do j = 1, min(n_states, size(P_nac_full, 2))
+                    P_nac_mat(i, j) = P_nac_full(i, j)
+                end do
+            end do
+        end if
+
+        ! W_up_down
+        if (present(W_up_down) .and. allocated(W_ud_full)) then
+            do i = 1, min(n_states, size(W_ud_full, 1))
+                do j = 1, min(n_states, size(W_ud_full, 2))
+                    W_up_down(i, j) = W_ud_full(i, j)
+                end do
+            end do
+        end if
+
+        ! W_down_up
+        if (present(W_down_up) .and. allocated(W_du_full)) then
+            do i = 1, min(n_states, size(W_du_full, 1))
+                do j = 1, min(n_states, size(W_du_full, 2))
+                    W_down_up(i, j) = W_du_full(i, j)
+                end do
+            end do
+        end if
+
+        ! P_up_down
+        if (present(P_up_down) .and. allocated(P_ud_full)) then
+            do i = 1, min(n_states, size(P_ud_full, 1))
+                do j = 1, min(n_states, size(P_ud_full, 2))
+                    P_up_down(i, j) = P_ud_full(i, j)
+                end do
+            end do
+        end if
+
+        ! P_down_up
+        if (present(P_down_up) .and. allocated(P_du_full)) then
+            do i = 1, min(n_states, size(P_du_full, 1))
+                do j = 1, min(n_states, size(P_du_full, 2))
+                    P_down_up(i, j) = P_du_full(i, j)
+                end do
+            end do
+        end if
+        
+        ! Clean up
+        if (allocated(evals_full)) deallocate(evals_full)
+        if (allocated(evecs_full)) deallocate(evecs_full)
+        if (allocated(x_global)) deallocate(x_global)
+        if (allocated(w_global)) deallocate(w_global)
+        if (allocated(P_full)) deallocate(P_full)
+        if (allocated(W_full)) deallocate(W_full)
+        if (allocated(P_nac_full)) deallocate(P_nac_full)
+        if (allocated(W_ud_full)) deallocate(W_ud_full)
+        if (allocated(W_du_full)) deallocate(W_du_full)
+        if (allocated(P_ud_full)) deallocate(P_ud_full)
+        if (allocated(P_du_full)) deallocate(P_du_full)
+
+        if (present(info)) info = ierr
+    end subroutine get_matrices_at_eta
     
 end module aeigen_solver
