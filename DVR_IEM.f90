@@ -29,7 +29,7 @@ module dvr_integral_equation_methods
     !   * Support coupled-channel (matrix V) generalisation.
     !   * Cache trigonometric factors sin(k r_j), cos(k r_j) for performance.
     !   * Add unit tests verifying convergence vs known analytic Coulomb phase shifts.
-    !---------------------------written by Kawaii_Bokuchin_Puyuyu(2025/11/11)----------------
+    !---------------------------written(2025/11/11)----------------
 
     use, intrinsic :: iso_fortran_env, only : wp => real64
     use finite_element_dvr
