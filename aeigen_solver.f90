@@ -15,7 +15,7 @@ module aeigen_solver
 ! 4. assemble_global_hamiltonian
 ! 5. solve_adiabatic_hamiltonian
 ! 6. calculate_coupling_matrix_elements
-!----------------written by puyuyu(2025/12/04 )----------------
+!----------------written (2025/12/04 )----------------
 !----------------Assisted by GitHub Copilot-------------------------
 
     use, intrinsic :: iso_fortran_env, only: wp => real64
@@ -1200,3 +1200,4 @@ module aeigen_solver
     
 
 end module aeigen_solver
+
