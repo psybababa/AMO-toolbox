@@ -8,7 +8,7 @@ module golub_welsch
 ! abstract:     computes the nodes (zeros) and weights for Lobatto quadrature
 !               using the Golub-Welsch algorithm
 !               using the lapack routine dstev
-!---------------written by: Kawaii_Bokuchin_Puyuyu(2025/10/28)-----------------------------
+!---------------written (2025/10/28)-----------------------------
 
   implicit none
   private
