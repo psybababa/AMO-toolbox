@@ -14,7 +14,7 @@ module finite_element_dvr
     ! - assemble_global_hamiltonian : assemble global H from element H matrices
     ! - build_global_grid : create global node coordinates, weights, and maps
     !
-    !--------------------written by: Kawaii_Bokuchin_Puyuyu(2025/10/29)----------------------
+    !--------------------written (2025/10/29)----------------------
 
     use, intrinsic :: iso_fortran_env, only: wp => real64
     use golub_welsch
